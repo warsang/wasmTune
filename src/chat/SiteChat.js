@@ -51,7 +51,15 @@ function stripThinkingInline(text) {
   return { text: out, stripped };
 }
 
-export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "Site assistant", cloudUrl = null, systemPrompt = null, temperature, repetitionPenalty, presencePenalty, frequencyPenalty, maxTokens, topP, templateKwargs } = {}) {
+function mkButton(label, fn) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.style.cssText = "padding:6px 10px;border:1px solid #666;border-radius:6px;background:#1a1a1a;color:#eee;cursor:pointer;font-size:12px";
+  b.onclick = fn;
+  return b;
+}
+
+export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = false, workerUrl = null, title = "Site assistant", cloudUrl = null, systemPrompt = null, temperature, repetitionPenalty, presencePenalty, frequencyPenalty, maxTokens, topP, templateKwargs } = {}) {
   if (typeof window === "undefined" || typeof customElements === "undefined") {
     throw new Error("<site-chat> needs a browser DOM");
   }
@@ -64,22 +72,29 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
     constructor() {
       super();
       this.attachShadow({ mode: "open" });
-      this.attachShadow ? null : null;
       this.shadowRoot.innerHTML = TEMPLATE;
       this.shadowRoot.querySelector(".title").textContent = this.getAttribute("title") || title;
       this._model = this.getAttribute("model") || model;
       this._gguf = this.getAttribute("gguf") || gguf;
+      this._onnx = this.getAttribute("onnx") || onnx;
       this._baseModel = this.getAttribute("base-model") || null;
       this._cloudUrl = this.getAttribute("cloud-url") || cloudUrl;
       this._workerUrl = this.getAttribute("worker-url") || workerUrl;
+      this._allowForce = allowForce || this.hasAttribute("allow-force");
       // Per-element overrides, set as plain JS properties before append
       // by mountAssistant / framework adapters:
       //   el.appConfig (MLC custom build), el.chatOptsPatch (merged over
-      //   define-time opts), el.baseModel (opt-in fallback id).
+      //   define-time opts), el.baseModel (opt-in fallback id),
+      //   el.entryId / el.entryRequirements (hardware gate), el.hwMismatch +
+      //   el.forceTier (mount-time "too weak" state), el.smallerTiers
+      //   (load-failure degrade candidates).
       // Fall back to attributes, then define-time options.
       this._chatOpts = chatOpts;
       this._readyFired = false;
       this._loadBlocked = false;
+      this._hwShown = false;
+      this._forceHw = false;
+      this._smallerTiers = [];
     }
     connectedCallback() {
       const $ = (s) => this.shadowRoot.querySelector(s);
@@ -92,6 +107,8 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
       else if (this.getAttribute("model")) this._model = this.getAttribute("model");
       if (this.gguf) this._gguf = this.gguf;
       else if (this.getAttribute("gguf")) this._gguf = this.getAttribute("gguf");
+      if (this.onnx) this._onnx = this.onnx;
+      else if (this.getAttribute("onnx")) this._onnx = this.getAttribute("onnx");
       if (this.appConfig !== undefined) this._appConfig = this.appConfig;
       this._appConfig = this._appConfig ?? null;
       if (this.chatOptsPatch) this._chatOpts = { ...this._chatOpts, ...this.chatOptsPatch };
@@ -99,8 +116,13 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
       if (this.getAttribute("base-model")) this._baseModel = this.getAttribute("base-model");
       if (this.siteName) this._siteName = this.siteName;
       if (this.getAttribute("site-name")) this._siteName = this.getAttribute("site-name");
+      if (this.getAttribute("allow-force") != null) this._allowForce = true;
+      if (this.entryId) this._entryId = this.entryId;
+      if (this.entryRequirements) this._entryRequirements = this.entryRequirements;
+      if (this.hwMismatch) this._hwMismatch = this.hwMismatch;
+      if (this.forceTier) this._forceTier = this.forceTier;
+      if (this.smallerTiers?.length) this._smallerTiers = [...this.smallerTiers];
       if (this.getAttribute("title")) this.shadowRoot.querySelector(".title").textContent = this.getAttribute("title");
-      this._worker = this._spawnWorker();
       $("form").addEventListener("submit", (e) => {
         e.preventDefault();
         const input = $("input");
@@ -108,9 +130,11 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
         if (!text) return;
         input.value = "";
         this.say("u", text);
-        this._worker?.postMessage({ type: "chat", messages: this._history(), model: this._model, cloudUrl: this._cloudUrl, chatOpts: this._chatOpts, siteName: this._siteName });
+        this._worker?.postMessage({ type: "chat", messages: this._history(), model: this._model, onnx: this._onnx, cloudUrl: this._cloudUrl, chatOpts: this._chatOpts, siteName: this._siteName });
       });
       this._historyCache = [];
+      if (this._hwMismatch) this._showHwMismatch(this._hwMismatch);
+      else this._worker = this._spawnWorker();
     }
     _history() {
       return this._historyCache.slice(-12);
@@ -124,7 +148,10 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
       return true;
     }
     get readyState() {
-      return this._readyFired ? "ready" : (this._loadBlocked ? "load-failed" : "loading");
+      if (this._readyFired) return "ready";
+      if (this._loadBlocked) return "load-failed";
+      if (this._hwShown) return "hw-mismatch";
+      return "loading";
     }
     say(who, text) {
       const div = document.createElement("div");
@@ -134,6 +161,19 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
       this._log.append(div);
       this._log.scrollTop = this._log.scrollHeight;
       this._historyCache.push({ role: who === "u" ? "user" : "assistant", content: text });
+    }
+    // Load a manifest tier: swap the artifact set and (re)spawn the worker.
+    _loadTier(tier, { forceHw = false } = {}) {
+      this._dismissHwError();
+      this._dismissLoadError();
+      this._loadBlocked = false;
+      this._readyFired = false;
+      if ("model" in tier) this._model = tier.model;
+      if ("gguf" in tier) this._gguf = tier.gguf;
+      if ("onnx" in tier) this._onnx = tier.onnx;
+      if ("appConfig" in tier) this._appConfig = tier.appConfig;
+      this._forceHw = !!forceHw || this._allowForce;
+      this._worker = this._spawnWorker();
     }
     _spawnWorker(initOverride = null) {
       try {
@@ -152,6 +192,7 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
           } else if (m.type === "token") this._appendToken(m.text);
           else if (m.type === "retract") this._retractStream(m.text, m.fallback);
           else if (m.type === "loadFailed") this._onArtifactFailed(m);
+          else if (m.type === "hwMismatch") this._onHwMismatch(m);
           else if (m.type === "done" && !m.looped) this._historyCache.push({ role: "assistant", content: m.full });
           else if (m.type === "error") {
             this._status.textContent = m.message;
@@ -160,7 +201,9 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
           }
         };
         const init = initOverride ?? {
-          model: this._model, gguf: this._gguf, appConfig: this._appConfig, chatOpts: this._chatOpts,
+          model: this._model, gguf: this._gguf, onnx: this._onnx, appConfig: this._appConfig,
+          chatOpts: this._chatOpts, entryId: this._entryId,
+          requirements: this._entryRequirements, forceHw: !!this._forceHw,
         };
         this._initParams = init;
         this._wantsArtifact = !!(init.gguf || init.appConfig);
@@ -175,13 +218,77 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
     }
     _onArtifactFailed(m) {
       // A manifest artifact failed to load. Never silently degrade: show a
-      // blocking banner; the user retries or explicitly opts into base.
+      // blocking banner; the user retries, drops to a smaller tier, or
+      // explicitly opts into base.
       if (!this._wantsArtifact) return; // plain prebuilt/base failure stays soft
       this._loadBlocked = true;
       this._showLoadError({ kind: m.kind, url: m.url, error: m.error });
       this.dispatchEvent(new CustomEvent("site-chat-load-failed", {
         bubbles: true, detail: { kind: m.kind, url: m.url, error: m.error },
       }));
+    }
+    // Worker-side hardware gate: the selected tier cannot run on this device.
+    _onHwMismatch(m) {
+      this._showHwMismatch({
+        reasons: m.reasons ?? [],
+        required: m.required ?? null,
+        detected: m.detected ?? null,
+      });
+    }
+    _showHwMismatch(detail) {
+      this._dismissHwError();
+      const div = document.createElement("div");
+      div.className = "row";
+      div.dataset.hwError = "1";
+      const title = document.createElement("div");
+      title.innerHTML = `<span class="a">assistant:</span> `;
+      const b = document.createElement("b");
+      b.textContent = "This device can't run the local chat model — hardware is below its requirements.";
+      title.append(b);
+      div.append(title);
+
+      const d = detail?.detected ?? {};
+      const bits = [
+        d.webgpu
+          ? `WebGPU: yes${d.adapter?.vendor ? ` (${d.adapter.vendor}${d.adapter.architecture ? `/${d.adapter.architecture}` : ""})` : ""}`
+          : "WebGPU: no",
+        d.budgetGB ? `memory: ~${d.budgetGB} GB` : null,
+        d.cores ? `${d.cores} cores` : null,
+        d.mobile ? "mobile device" : null,
+      ].filter(Boolean).join(" · ");
+      const detailEl = document.createElement("div");
+      detailEl.style.cssText = "font-size:12px;opacity:.85;margin:4px 0";
+      detailEl.textContent = `${(detail?.reasons ?? ["requirements not met"]).join("; ")}${bits ? ` — detected: ${bits}` : ""}`;
+      div.append(detailEl);
+
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:8px;margin-top:4px";
+      row.append(mkButton("Try anyway", () => {
+        const tier = this._forceTier ?? {
+          model: this._model, gguf: this._gguf, onnx: this._onnx, appConfig: this._appConfig,
+        };
+        this._loadTier(tier, { forceHw: true });
+      }));
+      if (this._baseModel) {
+        row.append(mkButton("Use base model instead", () => {
+          this._dismissHwError();
+          this._loadBlocked = false;
+          this._wantsArtifact = false;
+          this._forceHw = false;
+          this._worker = this._spawnWorker({ model: this._baseModel, chatOpts: this._chatOpts });
+        }));
+      }
+      div.append(row);
+      this._log.append(div);
+      this._log.scrollTop = this._log.scrollHeight;
+      this._engine.textContent = "(hardware mismatch)";
+      this._status.textContent = "hardware below model requirements — try anyway or a smaller model";
+      this._hwShown = true;
+      this.dispatchEvent(new CustomEvent("site-chat-hw-mismatch", { bubbles: true, detail }));
+    }
+    _dismissHwError() {
+      this.shadowRoot.querySelector('[data-hw-error="1"]')?.remove();
+      this._hwShown = false;
     }
     _showLoadError({ kind, url, error }) {
       this._dismissLoadError();
@@ -200,24 +307,27 @@ export function defineSiteChat({ model, gguf = null, workerUrl = null, title = "
       div.append(detail);
       const row = document.createElement("div");
       row.style.cssText = "display:flex;gap:8px;margin-top:4px";
-      const retry = document.createElement("button");
-      retry.textContent = "↻ Retry site model";
-      retry.onclick = () => {
+      row.append(mkButton("↻ Retry site model", () => {
         this._dismissLoadError();
         this._loadBlocked = false;
         this._worker = this._spawnWorker();
-      };
-      row.append(retry);
+      }));
+      // Hardware tiering: a smaller (lower-VRAM) tier often survives what
+      // the current one couldn't (GPU OOM, blob-read failures).
+      if (this._smallerTiers.length) {
+        row.append(mkButton(`Load smaller model (${this._smallerTiers[0].entryId})`, () => {
+          const next = this._smallerTiers.shift();
+          this._loadTier(next);
+        }));
+      }
       if (this._baseModel) {
-        const base = document.createElement("button");
-        base.textContent = "Use base model instead";
-        base.onclick = () => {
+        row.append(mkButton("Use base model instead", () => {
           this._dismissLoadError();
           this._loadBlocked = false;
           this._wantsArtifact = false;
+          this._forceHw = false;
           this._worker = this._spawnWorker({ model: this._baseModel, chatOpts: this._chatOpts });
-        };
-        row.append(base);
+        }));
       }
       div.append(row);
       this._log.append(div);

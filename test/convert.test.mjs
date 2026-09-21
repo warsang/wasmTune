@@ -1,9 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, writeFile, stat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { hashAndRename } from "../src/convert/to_mlc.mjs";
+import { hashAndRename, pretrainedEntry, writeModelsManifest } from "../src/convert/to_mlc.mjs";
 import { ggufUrl } from "../src/chat/fallback.mjs";
 
 describe("content-hashed artifacts", () => {
@@ -51,5 +51,41 @@ describe("ggufUrl", () => {
     assert.equal(ggufUrl(null), null);
     assert.equal(ggufUrl(undefined), null);
     assert.equal(ggufUrl({}), null);
+  });
+});
+
+describe("multi-model manifest assembly", () => {
+  it("builds pretrained entries from allowlist artifacts", () => {
+    const e = pretrainedEntry({
+      model: "Qwen/Qwen3-0.6B",
+      webllm: "Qwen3-0.6B-q4f16_1-MLC",
+      onnx: "onnx-community/Qwen3-0.6B-ONNX",
+      chat: { temperature: 0.2, ignored: "x" },
+    });
+    assert.equal(e.id, "qwen3-0.6b");
+    assert.equal(e.source, "pretrained");
+    assert.equal(e.artifacts.webllm, "Qwen3-0.6B-q4f16_1-MLC");
+    assert.equal(e.artifacts.onnx, "onnx-community/Qwen3-0.6B-ONNX");
+    assert.equal(e.artifacts.gguf, undefined);
+    assert.deepEqual(e.chat, { temperature: 0.2 });
+  });
+
+  it("writes models[] plus a legacy mirror of the primary entry", async () => {
+    const webDir = await mkdtemp(path.join(tmpdir(), "manifest-"));
+    const tuned = {
+      id: "gemma-4-e4b", label: null, base: "google/gemma-4-E4B-it", source: "tuned",
+      artifacts: { gguf: { url: "/models/gemma.abcdef12.gguf", sha256: "abcdef12", bytes: 10 } },
+      chat: { templateKwargs: { enable_thinking: false } },
+    };
+    const pre = pretrainedEntry({ model: "Qwen/Qwen3-0.6B", webllm: "Qwen3-0.6B-q4f16_1-MLC", onnx: "onnx-community/Qwen3-0.6B-ONNX" });
+    const { manifestPath, manifest } = await writeModelsManifest({ webDir, entries: [tuned, pre], notes: ["note-a"] });
+    assert.equal(manifest.models.length, 2);
+    assert.equal(manifest.version, "abcdef12");
+    assert.equal(manifest.base, "google/gemma-4-E4B-it");
+    assert.deepEqual(manifest.artifacts, tuned.artifacts);
+    assert.deepEqual(manifest.chat, tuned.chat);
+    assert.deepEqual(manifest.notes, ["note-a"]);
+    const onDisk = JSON.parse(await readFile(manifestPath, "utf8"));
+    assert.equal(onDisk.models[1].id, "qwen3-0.6b");
   });
 });

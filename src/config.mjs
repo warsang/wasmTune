@@ -113,7 +113,10 @@ export async function resolveConfig(opts = {}, cwd = process.cwd()) {
   const { path: p, config: fileCfg } = await loadConfig(cwd, o.config ?? null);
   const overrides = {};
   if (o.dataDir) overrides.dataDir = o.dataDir;
-  if (o.model) overrides.model = o.model;
+  if (o.model) {
+    overrides.model = o.model;
+    overrides.models = null; // an explicit --model replaces the tier list
+  }
   if (o.method) overrides.method = o.method;
   const training = {};
   if (o.backend) training.backend = o.backend;
@@ -139,9 +142,22 @@ export async function resolveConfig(opts = {}, cwd = process.cwd()) {
 
 export function normalizeConfig(raw = {}) {
   const d = defaultConfig();
+  const models = Array.isArray(raw.models) && raw.models.length
+    ? raw.models.map((m) => ({
+        model: m.model,
+        label: m.label ?? null,
+        trained: m.trained !== false,
+        gguf: m.gguf ?? null,
+        onnx: m.onnx ?? null,
+        webllm: m.webllm ?? null,
+        chat: { ...(m.chat ?? {}) },
+        requirements: m.requirements ?? null,
+      }))
+    : null;
   return {
     dataDir: raw.dataDir ?? d.dataDir,
-    model: raw.model ?? d.model,
+    model: raw.model ?? models?.[0]?.model ?? d.model,
+    models,
     method: String(raw.method ?? d.method).toLowerCase(),
     training: {
       ...d.training,
@@ -155,6 +171,24 @@ export function normalizeConfig(raw = {}) {
     chat: { ...(raw.chat ?? {}) },
     output: { ...d.output, ...(raw.output ?? {}) },
   };
+}
+
+// Normalized serving/training entries. Single-model configs yield one
+// implicit trained entry so every consumer has one code path.
+export function configModels(config) {
+  const list = Array.isArray(config.models) && config.models.length
+    ? config.models
+    : [{ model: config.model, trained: true }];
+  return list.map((e) => ({
+    model: e.model,
+    label: e.label ?? null,
+    trained: e.trained !== false,
+    gguf: e.gguf ?? null,
+    onnx: e.onnx ?? null,
+    webllm: e.webllm ?? null,
+    chat: { ...(config.chat ?? {}), ...(e.chat ?? {}) },
+    requirements: e.requirements ?? null,
+  }));
 }
 
 export function validateConfig(cfg, { cwd = process.cwd(), allowLarge = false } = {}) {
@@ -177,6 +211,27 @@ export function validateConfig(cfg, { cwd = process.cwd(), allowLarge = false } 
     } catch (e) {
       errors.push(e.message.split("\n")[0]);
     }
+  }
+  // Multi-model serving tiers: every entry must be allowlisted and unique.
+  if (cfg.models) {
+    const seen = new Set();
+    cfg.models.forEach((m, i) => {
+      if (!m?.model || typeof m.model !== "string") {
+        errors.push(`models[${i}].model must be a Hugging Face id string`);
+        return;
+      }
+      try {
+        assertAllowedModel(m.model, { allowLarge });
+      } catch (e) {
+        errors.push(`models[${i}]: ${e.message.split("\n")[0]}`);
+      }
+      const key = m.model.toLowerCase();
+      if (seen.has(key)) errors.push(`models[${i}]: duplicate model ${m.model}`);
+      seen.add(key);
+      if (m.gguf !== null && m.gguf !== undefined && typeof m.gguf !== "string") {
+        errors.push(`models[${i}].gguf must be a URL string`);
+      }
+    });
   }
   if (!VALID_METHODS.has(cfg.method)) {
     errors.push(`method must be one of ${[...VALID_METHODS].join("|")}`);

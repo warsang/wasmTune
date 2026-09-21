@@ -16,9 +16,12 @@ export const SiteChat = forwardRef(function SiteChat(
     title = "Site assistant",
     siteName = null,
     workerUrl = null,
+    allowForce = false,
+    preferModel = null,
     onReady,
     onError,
     onLoadFailed,
+    onHardwareMismatch,
     onEvent,
     ...chatOpts
   },
@@ -43,6 +46,7 @@ export const SiteChat = forwardRef(function SiteChat(
       if (e.type === "site-chat-ready") onReady?.(e.detail);
       else if (e.type === "site-chat-error") onError?.(e.detail);
       else if (e.type === "site-chat-load-failed") onLoadFailed?.(e.detail);
+      else if (e.type === "site-chat-hw-mismatch") onHardwareMismatch?.(e.detail);
       onEvent?.(e);
     };
     mountAssistant({
@@ -52,6 +56,8 @@ export const SiteChat = forwardRef(function SiteChat(
       title,
       siteName,
       workerUrl,
+      allowForce,
+      preferModel,
       onEvent: toHandler(emit, {}),
       ...chatOpts,
     }).then(({ element }) => {

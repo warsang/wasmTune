@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { normalizeConfig, validateConfig, configFromFlags, resolveConfig } from "../src/config.mjs";
+import { normalizeConfig, validateConfig, configFromFlags, resolveConfig, configModels } from "../src/config.mjs";
 
 describe("config", () => {
   it("accepts a minimal valid config shape", () => {
@@ -12,6 +12,52 @@ describe("config", () => {
     // dataDir "." exists relative to package dir; only model/method shape asserted here
     assert.ok(!errors.some((e) => e.includes("method")));
     assert.ok(!errors.some((e) => e.includes("allowlist")));
+  });
+
+  it("accepts a multi-model tier list and derives the primary model", () => {
+    const cfg = normalizeConfig({
+      dataDir: ".",
+      models: [
+        { model: "google/gemma-4-E4B-it", trained: true },
+        { model: "Qwen/Qwen3-0.6B", trained: false },
+      ],
+      method: "sft",
+    });
+    assert.equal(cfg.model, "google/gemma-4-E4B-it"); // models[0]
+    const errors = validateConfig(cfg, { cwd: new URL("../../", import.meta.url).pathname, allowLarge: false });
+    assert.deepEqual(errors, []);
+    const entries = configModels(cfg);
+    assert.equal(entries.length, 2);
+    assert.equal(entries[0].trained, true);
+    assert.equal(entries[1].trained, false);
+  });
+
+  it("rejects duplicate or non-allowlisted tier entries", () => {
+    const cfg = normalizeConfig({
+      dataDir: ".",
+      models: [
+        { model: "Qwen/Qwen3-0.6B" },
+        { model: "qwen/qwen3-0.6B" },
+        { model: "meta-llama/Llama-3.1-405B" },
+      ],
+    });
+    const errors = validateConfig(cfg, { cwd: "/", allowLarge: false });
+    assert.ok(errors.some((e) => e.includes("duplicate")), JSON.stringify(errors));
+    assert.ok(errors.some((e) => e.includes("models[2]")), JSON.stringify(errors));
+  });
+
+  it("configModels merges entry chat over config chat", () => {
+    const cfg = normalizeConfig({
+      dataDir: ".", model: "Qwen/Qwen3-0.6B",
+      chat: { temperature: 0.4 },
+      models: [
+        { model: "google/gemma-4-E4B-it", chat: { temperature: 0.2 } },
+        { model: "Qwen/Qwen3-0.6B", trained: false },
+      ],
+    });
+    const entries = configModels(cfg);
+    assert.equal(entries[0].chat.temperature, 0.2); // entry wins
+    assert.equal(entries[1].chat.temperature, 0.4); // config default survives
   });
 
   it("rejects unknown models without --allow-large", () => {

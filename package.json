@@ -1,7 +1,7 @@
 {
   "name": "wasmtune",
-  "version": "0.1.0",
-  "description": "Fine-tune a small LLM on your website's own pages (local LoRA/QLoRA via Unsloth on NVIDIA or MLX on Apple Silicon) and embed it as a WebGPU chat window. Generic — works with any static site folder.",
+  "version": "0.2.0",
+  "description": "Fine-tune a small LLM on your website's own pages (local LoRA/QLoRA via Unsloth on NVIDIA or MLX on Apple Silicon) and embed it as a WebGPU chat window that serves the model tier matching each visitor's hardware. Generic — works with any static site folder.",
   "type": "module",
   "license": "MIT",
   "author": "",

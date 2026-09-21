@@ -33,17 +33,17 @@ function run(cmd, args, { cwd }) {
 export async function ensureVenv({ outDir, backend, cwd = process.cwd(), python = "python3" }) {
   const { venv, pip } = venvPaths(outDir);
   if (!existsSync(venv)) {
-    console.error(`[finetune] creating venv at ${venv} ...`);
+    console.error(`[wasmtune] creating venv at ${venv} ...`);
     await run(python, ["-m", "venv", venv], { cwd });
   } else {
-    console.error(`[finetune] reusing venv at ${venv}`);
+    console.error(`[wasmtune] reusing venv at ${venv}`);
   }
   if (process.env.FINETUNE_SKIP_INSTALL === "1") {
-    console.error("[finetune] FINETUNE_SKIP_INSTALL=1, skipping pip install");
+    console.error("[wasmtune] FINETUNE_SKIP_INSTALL=1, skipping pip install");
     return venvPaths(outDir);
   }
   const req = path.join(PKG_ROOT, "python", backend === "mlx" ? "requirements-mlx.txt" : "requirements-cuda.txt");
-  console.error(`[finetune] pip install -r ${path.basename(req)} (first run takes a while) ...`);
+  console.error(`[wasmtune] pip install -r ${path.basename(req)} (first run takes a while) ...`);
   await run(pip, ["install", "-U", "pip", "wheel"], { cwd });
   await run(pip, ["install", "-r", req], { cwd });
   return venvPaths(outDir);
@@ -53,7 +53,7 @@ export async function runTrainer({ outDir, backend, trainerArgs = [], cwd = proc
   const { py } = venvPaths(outDir);
   const script = path.join(PKG_ROOT, "python", backend === "mlx" ? "train_mlx.py" : "train_unsloth.py");
   const pyExe = existsSync(py) ? py : "python3";
-  console.error(`[finetune] ${pyExe} ${path.basename(script)} ${trainerArgs.join(" ")}`);
+  console.error(`[wasmtune] ${pyExe} ${path.basename(script)} ${trainerArgs.join(" ")}`);
   await run(pyExe, [script, ...trainerArgs], { cwd });
 }
 
@@ -62,6 +62,6 @@ export async function runPython({ outDir, script, args = [], cwd = process.cwd()
   const { py } = venvPaths(outDir);
   const full = path.isAbsolute(script) ? script : path.join(PKG_ROOT, script);
   const pyExe = existsSync(py) ? py : "python3";
-  console.error(`[finetune] ${pyExe} ${path.basename(full)} ${args.join(" ")}`);
+  console.error(`[wasmtune] ${pyExe} ${path.basename(full)} ${args.join(" ")}`);
   await run(pyExe, [full, ...args], { cwd });
 }

@@ -109,7 +109,7 @@ export async function synthQaForChunk(chunkText, { provider, model, siteName, pa
   } else if (provider === "ollama") {
     text = await chatCompletions({ baseUrl: "http://localhost:11434/v1", model, system, user: chunkText.slice(0, 4000) });
   } else if (provider === "mlx") {
-    if (!venvPy) throw new Error("mlx synth needs a venv python (run inside `finetune dataset`)");
+    if (!venvPy) throw new Error("mlx synth needs a venv python (run inside `wasmtune dataset`)");
     text = await synthViaMlx({ venvPy, model, system, chunkText });
   } else {
     throw new Error(`unknown synth provider "${provider}"`);

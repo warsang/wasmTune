@@ -16,7 +16,7 @@ export async function buildDataset(config, { cwd = process.cwd(), synth = null }
 
   const { root, docs, totalChars } = await collectTexts(config.dataDir, { cwd });
   const allChunks = chunkDocs(docs);
-  // Deterministic holdout for `finetune eval`: ~5% of chunks by hash, never trained on.
+  // Deterministic holdout for `wasmtune eval`: ~5% of chunks by hash, never trained on.
   const { trainChunks, holdoutChunks } = splitHoldout(allChunks, 0.05);
   const siteName = config.dataset?.siteName ?? inferSiteName(cwd);
   const summary = config.dataset?.summary ?? inferSummary(docs);
@@ -32,11 +32,11 @@ export async function buildDataset(config, { cwd = process.cwd(), synth = null }
       maxChunks: config.dataset?.synthMaxChunks ?? 200,
       venvPy,
       onProgress: (p) => {
-        if (p.error) console.error(`[finetune] synth ${p.done}/${p.total} ${p.source}: ${p.error}`);
-        else if (p.done % 25 === 0 || p.done === p.total) console.error(`[finetune] synth ${p.done}/${p.total} (${p.pairs} pairs)`);
+        if (p.error) console.error(`[wasmtune] synth ${p.done}/${p.total} ${p.source}: ${p.error}`);
+        else if (p.done % 25 === 0 || p.done === p.total) console.error(`[wasmtune] synth ${p.done}/${p.total} (${p.pairs} pairs)`);
       },
     });
-    console.error(`[finetune] synth: ${synthPairs.length} pairs via ${synthSpec}`);
+    console.error(`[wasmtune] synth: ${synthPairs.length} pairs via ${synthSpec}`);
   }
   const sft = buildSftBlend(trainChunks, { siteName, summary, maxPairs, extraPairs: synthPairs });
   const dpoSeed = sftToDpoSeed(sft, { chunks: trainChunks });

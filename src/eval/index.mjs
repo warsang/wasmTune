@@ -1,4 +1,4 @@
-// wasmtune — `finetune eval` orchestration (generic).
+// wasmtune — `wasmtune eval` orchestration (generic).
 //
 // Builds eval prompts from the training holdout (never trained on), runs
 // base + tuned models, scores with src/eval/score.mjs, and gates on
@@ -72,12 +72,12 @@ export async function runEval(config, { cwd = process.cwd(), backend = "mlx", ma
   await mkdir(outDir, { recursive: true });
   const holdoutPath = path.join(outDir, "dataset.holdout.json");
   if (!existsSync(holdoutPath)) {
-    throw new Error(`no holdout found at ${holdoutPath} — run "finetune dataset" first (newer versions write dataset.holdout.json).`);
+    throw new Error(`no holdout found at ${holdoutPath} — run "wasmtune dataset" first (newer versions write dataset.holdout.json).`);
   }
   const holdoutChunks = JSON.parse(await readFile(holdoutPath, "utf8"));
   const sftPath = path.join(outDir, "dataset.sft.jsonl");
   if (!existsSync(sftPath)) {
-    throw new Error(`no SFT dataset at ${sftPath} — run "finetune dataset" first.`);
+    throw new Error(`no SFT dataset at ${sftPath} — run "wasmtune dataset" first.`);
   }
   const sftPairs = (await readFile(sftPath, "utf8")).split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
   const siteName = config.dataset?.siteName
@@ -182,7 +182,7 @@ export async function runEval(config, { cwd = process.cwd(), backend = "mlx", ma
   const judgeSpec = judge ?? config.eval?.judge ?? null;
   if (judgeSpec) {
     const { provider, model } = parseJudgeSpec(judgeSpec);
-    console.error(`[finetune] judge: ${provider}:${model} (advisory, memorization rows)`);
+    console.error(`[wasmtune] judge: ${provider}:${model} (advisory, memorization rows)`);
     const memIds = new Set(memoPrompts.map((p) => p.id));
     const collectOutputs = async (label) => {
       const out = JSON.parse(await readFile(path.join(outDir, `eval.out.${label}.json`), "utf8"));
@@ -194,7 +194,7 @@ export async function runEval(config, { cwd = process.cwd(), backend = "mlx", ma
     const judgeOne = async (label) => judgeRows(await collectOutputs(label), {
       provider, model,
       onProgress: (p) => {
-        if (p.done % 10 === 0 || p.done === p.total) console.error(`[finetune] judge ${label} ${p.done}/${p.total}`);
+        if (p.done % 10 === 0 || p.done === p.total) console.error(`[wasmtune] judge ${label} ${p.done}/${p.total}`);
       },
     });
     judgeReport = { spec: judgeSpec, base: await judgeOne("base") };
@@ -220,7 +220,7 @@ export async function runEval(config, { cwd = process.cwd(), backend = "mlx", ma
   await writeFile(loopsPath, loops.map((r) => JSON.stringify(r)).join("\n") + (loops.length ? "\n" : ""));
   report.dpoLoops = { count: loops.length, file: loopsPath };
   await writeFile(reportPath, JSON.stringify(report, null, 2));
-  if (loops.length) console.error(`[finetune] eval: ${loops.length} loop contrasts -> ${loopsPath} (used by train --method dpo)`);
+  if (loops.length) console.error(`[wasmtune] eval: ${loops.length} loop contrasts -> ${loopsPath} (used by train --method dpo)`);
   return { reportPath, report };
 }
 

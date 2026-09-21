@@ -262,3 +262,41 @@ describe("checkServing", () => {
     assert.ok(r.errors.some((e) => e.includes("ghost.gguf")), JSON.stringify(r.errors));
   });
 });
+
+describe("multi-model manifests", () => {
+  it("validates every entry and tags messages with the entry id", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "serve-"));
+    const webDir = path.join(dir, "public", "models");
+    await mkdir(webDir, { recursive: true });
+    await writeFile(path.join(webDir, "gemma.gguf"), fakeGguf("gemma4"));
+    await writeFile(path.join(webDir, "model-manifest.json"), JSON.stringify({
+      version: "multi1",
+      models: [
+        {
+          id: "gemma-4-e4b", base: "google/gemma-4-E4B-it", source: "tuned",
+          artifacts: { gguf: { url: "/models/gemma.gguf" } },
+        },
+        {
+          id: "qwen3-0.6b", base: "Qwen/Qwen3-0.6B", source: "pretrained",
+          artifacts: { webllm: "Qwen3-0.6B-q4f16_1-MLC", onnx: "onnx-community/Qwen3-0.6B-ONNX" },
+        },
+        {
+          id: "ghost-tier", base: "Qwen/Qwen3-0.6B", source: "tuned",
+          artifacts: { gguf: { url: "/models/ghost.gguf" } },
+        },
+      ],
+    }));
+    const wasmDir = path.join(dir, "node_modules", "@wllama", "wllama", "esm", "wasm");
+    await mkdir(wasmDir, { recursive: true });
+    await writeFile(path.join(wasmDir, "wllama.wasm"), Buffer.from("…llama_model_gemma4…"));
+    await writeFile(path.join(dir, "node_modules", "@wllama", "wllama", "package.json"), JSON.stringify({ name: "@wllama/wllama" }));
+    const r = await checkServing({ cwd: dir, config: { output: { webDir: "./public/models" } } });
+    assert.equal(r.ok, false);
+    assert.ok(r.errors.some((e) => e.startsWith("[ghost-tier]") && e.includes("ghost.gguf")), JSON.stringify(r.errors));
+    // Per-entry details: the first entry keeps the legacy keys, later ones
+    // are namespaced by entry id.
+    assert.equal(r.details.ggufArch, "gemma4");
+    assert.equal(r.details.runtimeSupportsArch, true);
+    assert.equal(r.details["webllm#qwen3-0.6b"], "Qwen3-0.6B-q4f16_1-MLC");
+  });
+});

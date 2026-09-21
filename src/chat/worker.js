@@ -5,6 +5,8 @@
 import { resolveChatOptions, defaultSystemPrompt, toWebLlmRequest, toWllamaRequest } from "./options.mjs";
 import { createLoopGuard, truncateAtLoop, stripThinkingBlocks } from "./guard.mjs";
 import { ggufUrl } from "./fallback.mjs";
+import { detectHardware, fitRequirements } from "./hardware.mjs";
+import { requirementsFor } from "../models.mjs";
 
 // Final text for history + done display: loop-truncated, thinking-stripped,
 // thinking-leak flagged (eval + debugging signal).
@@ -26,10 +28,33 @@ self.onmessage = async (e) => {
 
 let strictArtifacts = false;
 
-async function init({ model, appConfig, modelId, gguf, wasmUrl, chatOpts: opts, strictArtifacts: strict }) {
+async function init({ model, appConfig, modelId, gguf, onnx = null, wasmUrl, chatOpts: opts, strictArtifacts: strict, entryId = null, requirements = null, forceHw = false }) {
   chatOpts = resolveChatOptions(opts);
   strictArtifacts = !!strict;
   try {
+    // Hardware gate: refuse tiers this device can't run. mountAssistant
+    // already picks a fitting tier, but standalone <site-chat> usage and
+    // manifest edits after mount land here. "Try anyway" sets forceHw.
+    if (!forceHw) {
+      const req = requirements ?? requirementsFor(entryId) ?? requirementsFor(model);
+      if (req) {
+        const hw = await detectHardware(self);
+        const fit = fitRequirements(req, hw);
+        if (!fit.ok) {
+          post({
+            type: "hwMismatch",
+            reasons: fit.reasons,
+            required: req,
+            detected: {
+              budgetGB: fit.budget, webgpu: !!hw.webgpu, deviceMemoryGB: hw.deviceMemoryGB,
+              cores: hw.cores, mobile: hw.mobile, adapter: hw.adapter,
+            },
+          });
+          post({ type: "status", text: "hardware below model requirements — see banner above" });
+          return;
+        }
+      }
+    }
     post({ type: "status", text: "checking WebGPU…" });
     const hasGpu = await hasWebGPU();
     if (hasGpu && (model || appConfig)) {
@@ -122,7 +147,7 @@ function withSystemPrompt(messages, siteName) {
   return [{ role: "system", content: prompt }, ...messages];
 }
 
-async function chat({ messages, model, cloudUrl, chatOpts: opts, siteName }) {
+async function chat({ messages, model, onnx = null, cloudUrl, chatOpts: opts, siteName }) {
   if (opts) chatOpts = resolveChatOptions(opts);
   if (!chatOpts) chatOpts = resolveChatOptions();
   const withSystem = withSystemPrompt(messages, siteName);
@@ -179,7 +204,7 @@ async function chat({ messages, model, cloudUrl, chatOpts: opts, siteName }) {
     }
     if (engineKind === "transformers") {
       const { pipeline } = await import("@huggingface/transformers");
-      const gen = await pipeline("text-generation", model ?? "onnx-community/SmolLM2-135M-Instruct-ONNX");
+      const gen = await pipeline("text-generation", onnx ?? model ?? "onnx-community/SmolLM2-135M-Instruct-ONNX");
       const out = await gen(withSystem.map((m) => m.content).join("\n"), {
         max_new_tokens: chatOpts.maxTokens,
         temperature: chatOpts.temperature,
@@ -209,7 +234,7 @@ async function chat({ messages, model, cloudUrl, chatOpts: opts, siteName }) {
     post({
       type: "error",
       message: "no local model loaded",
-      fallback: "Chat model is not available in this browser yet. An admin needs to run `finetune convert` and serve the model files.",
+      fallback: "Chat model is not available in this browser yet. An admin needs to run `wasmtune convert` and serve the model files.",
     });
   } catch (err) {
     post({ type: "error", message: String(err.message ?? err) });

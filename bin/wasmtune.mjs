@@ -11,12 +11,12 @@ import process from "node:process";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, "..");
-const { loadConfig, defaultConfig, validateConfig, resolveConfig } = await import("../src/config.mjs");
-const { formatModels, assertAllowedModel } = await import("../src/models.mjs");
+const { loadConfig, defaultConfig, validateConfig, resolveConfig, configModels } = await import("../src/config.mjs");
+const { formatModels, assertAllowedModel, lookupModel, slugifyModel } = await import("../src/models.mjs");
 const { buildDataset } = await import("../src/dataset/index.mjs");
 const { resolveBackend, detectPlatform, trainerFor } = await import("../src/train/router.mjs");
 const { ensureVenv, runTrainer, venvPaths } = await import("../src/train/venv.mjs");
-const { convertModel } = await import("../src/convert/to_mlc.mjs");
+const { convertModel, pretrainedEntry, writeModelsManifest } = await import("../src/convert/to_mlc.mjs");
 const { serve } = await import("../src/serve.mjs");
 const { runEval, formatEvalTable } = await import("../src/eval/index.mjs");
 
@@ -34,10 +34,13 @@ Commands:
   serve [--config <path>] [--port N]
   build [--config <path>] [train/eval/dataset flags...] — dataset→train→eval→convert; eval gate fails the build
 
-Config: finetune.config.json (or .js/.mjs). See templates/wasmtune.config.example.json.
+Config: wasmtune.config.json (or .js/.mjs). See templates/wasmtune.config.example.json.
 Config-free runs: pass --dataDir <dir> --model <hf-id> instead of a file, plus
 any of --method/--backend/--epochs/--lr/--batch-size/--quant/--out-dir/--web-dir.
 With a file present those same flags override it. Precedence: flags > file > defaults.
+Multi-model tiers: add "models": [{ model, trained?, gguf?, label?, chat?, requirements? }]
+to the config. train/eval run per trained entry (.finetune/<slug>/); convert writes
+one manifest with every tier, and the browser serves the best tier its hardware can run.
 Docs: https://github.com/warsang/wasmTune`;
 
 function parse(argv) {
@@ -115,11 +118,34 @@ async function cmdDataset(opts, cwd) {
   console.error(`wrote ${report.files.sft}\n      ${report.files.dpo}\n      ${report.files.grpo}`);
 }
 
-async function cmdTrain(opts, cwd) {
-  const { config } = await resolveConfig(opts, cwd);
+// Per-entry working config: multi-entry builds isolate artifacts under
+// .finetune/<slug>/; single-entry configs keep the legacy .finetune/ layout.
+function entryConfig(config, entry, multi) {
+  const relOut = multi ? path.join(config.output.dir, slugifyModel(entry.model)) : config.output.dir;
+  const pinnedMlx = config.training.mlxModel && entry.model === config.model ? config.training.mlxModel : null;
+  const mlxModel = pinnedMlx ?? lookupModel(entry.model)?.mlx ?? config.training.mlxModel ?? entry.model;
+  return {
+    sub: {
+      ...config,
+      model: entry.model,
+      output: { ...config.output, dir: relOut },
+      training: { ...config.training, mlxModel },
+      chat: entry.chat ?? config.chat ?? {},
+    },
+    relOut,
+  };
+}
+
+// Trained entries only; pretrained tiers are served straight from their
+// public browser artifacts and never enter the training pipeline.
+function trainedEntries(config) {
+  return configModels(config).filter((e) => e.trained);
+}
+
+async function trainOne(config, outDir, opts, cwd) {
+  const entry = configModels(config)[0];
   assertAllowedModel(config.model, { allowLarge: !!opts["allow-large"] });
   const backend = await resolveBackend(opts.backend ?? config.training.backend, {});
-  const outDir = path.resolve(cwd, config.output.dir);
   await mkdir(outDir, { recursive: true });
   console.error(`[wasmtune] backend=${backend} model=${config.model} method=${config.method}`);
   console.error(`[wasmtune] trainer=${trainerFor(backend)}`);
@@ -191,34 +217,102 @@ async function cmdTrain(opts, cwd) {
   await runTrainer({ outDir, backend, trainerArgs: ["--args-json", argsJson], cwd });
   const { venv } = venvPaths(outDir);
   console.error(`[wasmtune] done. adapters: ${path.join(outDir, "run", "adapters")} (venv: ${venv})`);
-  console.error(`[wasmtune] next: finetune convert`);
+  void entry;
+}
+
+async function cmdTrain(opts, cwd) {
+  const { config } = await resolveConfig(opts, cwd);
+  const entries = trainedEntries(config);
+  if (!entries.length) {
+    console.error("[wasmtune] every configured model is pretrained — nothing to train. Run `wasmtune convert` to publish them.");
+    return;
+  }
+  const multi = entries.length > 1;
+  for (const entry of entries) {
+    const { sub, relOut } = entryConfig(config, entry, multi);
+    if (multi) console.error(`[wasmtune] tier ${entry.model} -> ${relOut}`);
+    await trainOne(sub, path.resolve(cwd, relOut), opts, cwd);
+    if (multi) console.error(`[wasmtune] next: wasmtune convert`);
+  }
 }
 
 async function cmdEval(opts, cwd) {
   const { config } = await resolveConfig(opts, cwd);
-  const backend = await resolveBackend(opts.backend ?? config.training.backend, {});
-  const { reportPath, report } = await runEval(config, {
-    cwd,
-    backend,
-    maxPrompts: opts.maxPrompts ?? 50,
-    maxTokens: opts.maxTokens ?? 128,
-    skipTuned: !!opts["skip-tuned"],
-    judge: opts.judge ?? null,
-    python: opts.python ?? "python3",
-  });
-  console.error(formatEvalTable(report));
-  console.error(`wrote ${reportPath}`);
-  if (!report.gate) {
-    throw new Error("eval gate failed: tuned model regressed vs base (set eval.failOnRegression=false to allow)");
+  const entries = trainedEntries(config);
+  if (!entries.length) {
+    console.error("[wasmtune] every configured model is pretrained — nothing to evaluate.");
+    return;
+  }
+  const multi = entries.length > 1;
+  for (const entry of entries) {
+    const { sub } = entryConfig(config, entry, multi);
+    if (multi) console.error(`[wasmtune] eval tier ${entry.model}`);
+    const backend = await resolveBackend(opts.backend ?? sub.training.backend, {});
+    const { reportPath, report } = await runEval(sub, {
+      cwd,
+      backend,
+      maxPrompts: opts.maxPrompts ?? 50,
+      maxTokens: opts.maxTokens ?? 128,
+      skipTuned: !!opts["skip-tuned"],
+      judge: opts.judge ?? null,
+      python: opts.python ?? "python3",
+    });
+    console.error(formatEvalTable(report));
+    console.error(`wrote ${reportPath}`);
+    if (!report.gate) {
+      throw new Error(`eval gate failed: tuned model regressed vs base (${entry.model}; set eval.failOnRegression=false to allow)`);
+    }
   }
 }
 
 async function cmdConvert(opts, cwd) {
   const { config } = await resolveConfig(opts, cwd);
-  const mergedDir = path.join(path.resolve(cwd, config.output.dir), "run", "merged");
+  const entries = configModels(config);
   const webDir = path.resolve(cwd, config.output.webDir);
-  const { manifestPath, manifest } = await convertModel({ mergedDir, webDir, modelId: config.model, chat: config.chat ?? {} });
+  const multi = entries.length > 1;
+  const outEntries = [];
+  const notes = [];
+  for (const entry of entries) {
+    const slug = slugifyModel(entry.model);
+    if (entry.trained) {
+      const { relOut } = entryConfig(config, entry, multi);
+      const mergedDir = path.join(path.resolve(cwd, relOut), "run", "merged");
+      if (!existsSync(mergedDir)) {
+        notes.push(`${slug}: no merged weights at ${mergedDir} — run "wasmtune train" first (skipped)`);
+        continue;
+      }
+      console.error(`[wasmtune] converting tuned tier ${entry.model}`);
+      const { entry: built, notes: n } = await convertModel({
+        mergedDir, webDir, modelId: entry.model, chat: entry.chat,
+        subdir: multi ? slug : null, label: entry.label,
+        requirements: entry.requirements, writeManifest: false,
+      });
+      outEntries.push(built);
+      notes.push(...n.map((x) => `${slug}: ${x}`));
+    } else {
+      const m = lookupModel(entry.model);
+      if (!m) throw new Error(`unknown pretrained model "${entry.model}" (not on the allowlist)`);
+      // A custom URL is required for GGUF tiers; allowlist gguf values are
+      // HF repo ids (not loadable URLs) and are skipped with a note.
+      const gguf = entry.gguf && /^https?:\/\/.+\.gguf(\?.*)?$/i.test(entry.gguf) ? entry.gguf : null;
+      if (entry.gguf && !gguf) notes.push(`${slug}: gguf "${entry.gguf}" is not a direct .gguf URL — ignored`);
+      const webllm = entry.webllm ?? m.webllm ?? null;
+      const onnx = entry.onnx ?? m.onnx ?? null;
+      if (!gguf && !webllm && !onnx) {
+        notes.push(`${slug}: no browser artifact available (allowlist has no webllm/onnx build and no direct gguf URL) — tier will fail the serving check`);
+      }
+      console.error(`[wasmtune] publishing pretrained tier ${entry.model} (${webllm ?? onnx ?? gguf ?? "no artifact"})`);
+      outEntries.push(pretrainedEntry({
+        model: entry.model, label: entry.label, gguf,
+        onnx, webllm,
+        chat: entry.chat, requirements: entry.requirements,
+      }));
+    }
+  }
+  if (!outEntries.length) throw new Error("no model entries produced — nothing to publish");
+  const { manifestPath, manifest } = await writeModelsManifest({ webDir, entries: outEntries, notes });
   console.error(`wrote ${manifestPath}`);
+  console.error(`[wasmtune] manifest: ${manifest.models.length} model tier(s): ${manifest.models.map((m) => m.id).join(", ")}`);
   for (const n of manifest.notes) console.error(`note: ${n}`);
 }
 

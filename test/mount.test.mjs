@@ -8,6 +8,10 @@ import {
   resolveManifestUrl,
 } from "../src/chat/mount.mjs";
 
+const HW_DESKTOP = { webgpu: true, deviceMemoryGB: 8, cores: 8, mobile: false };
+const HW_MOBILE = { webgpu: true, deviceMemoryGB: 4, cores: 8, mobile: true };
+const HW_TINY = { webgpu: false, deviceMemoryGB: 0.5, cores: 2, mobile: true };
+
 const MANIFEST = {
   base: "google/gemma-4-E4B-it",
   version: "abc123",
@@ -19,6 +23,21 @@ const MANIFEST = {
     },
   },
   chat: { templateKwargs: { enable_thinking: false }, temperature: 0.5 },
+};
+
+const TIERED = {
+  version: "t1",
+  models: [
+    {
+      id: "gemma-4-e4b", base: "google/gemma-4-E4B-it", source: "tuned",
+      artifacts: { gguf: { url: "/models/gemma/m.Q4_K_M.abcdef12.gguf", sha256: "x", bytes: 3.9e9 } },
+      chat: { templateKwargs: { enable_thinking: false } },
+    },
+    {
+      id: "qwen3-0.6b", base: "Qwen/Qwen3-0.6B", source: "pretrained",
+      artifacts: { webllm: "Qwen3-0.6B-q4f16_1-MLC", onnx: "onnx-community/Qwen3-0.6B-ONNX" },
+    },
+  ],
 };
 
 describe("resolveManifestUrl", () => {
@@ -73,6 +92,47 @@ describe("planFromManifest", () => {
     assert.equal(plan.gguf, null);
     assert.equal(plan.appConfig, null);
   });
+
+  it("picks the biggest tier that fits when hardware is provided", () => {
+    const plan = planFromManifest(TIERED, href, {}, { hw: HW_DESKTOP });
+    assert.equal(plan.entryId, "gemma-4-e4b");
+    assert.equal(
+      plan.gguf,
+      "https://x.test/models/gemma/m.Q4_K_M.abcdef12.gguf",
+    );
+    assert.equal(plan.hwMismatch, null);
+    assert.deepEqual(plan.smaller.map((s) => s.entryId), ["qwen3-0.6b"]);
+    assert.equal(plan.entryRequirements.minDeviceMemoryGB, 6);
+  });
+
+  it("drops to the mobile tier and resolves pretrained artifacts", () => {
+    const plan = planFromManifest(TIERED, href, {}, { hw: HW_MOBILE });
+    assert.equal(plan.entryId, "qwen3-0.6b");
+    assert.equal(plan.model, "Qwen3-0.6B-q4f16_1-MLC");
+    assert.equal(plan.onnx, "onnx-community/Qwen3-0.6B-ONNX");
+    assert.equal(plan.gguf, null);
+  });
+
+  it("reports a hardware mismatch with the smallest tier as forceTier", () => {
+    const plan = planFromManifest(TIERED, href, {}, { hw: HW_TINY });
+    assert.equal(plan.entry, null);
+    assert.ok(plan.hwMismatch.reasons.length > 0);
+    assert.equal(plan.hwMismatch.smallestId, "qwen3-0.6b");
+    assert.equal(plan.forceTier.entryId, "qwen3-0.6b");
+    assert.equal(plan.forceTier.model, "Qwen3-0.6B-q4f16_1-MLC");
+  });
+
+  it("merges per-entry chat hints over manifest-level hints", () => {
+    const plan = planFromManifest(TIERED, href, {}, { hw: HW_DESKTOP });
+    assert.deepEqual(plan.chatOpts.templateKwargs, { enable_thinking: false });
+    assert.equal(plan.chatOpts.temperature, 0.3); // default when unspecified
+  });
+
+  it("legacy callers without hw stay ungated", () => {
+    const plan = planFromManifest(TIERED, href, {});
+    assert.equal(plan.entryId, "gemma-4-e4b");
+    assert.equal(plan.hwMismatch, null);
+  });
 });
 
 describe("fetchManifest", () => {
@@ -122,6 +182,7 @@ describe("mountAssistant", () => {
         manifestUrl: "/models/model-manifest.json",
         title: "Demo",
         temperature: 0.7,
+        hardware: HW_DESKTOP,
       });
       assert.equal(element.tagName.toLowerCase(), "site-chat");
       assert.equal(element.getAttribute("title"), "Demo");
@@ -133,6 +194,49 @@ describe("mountAssistant", () => {
       assert.deepEqual(plan.chatOpts.templateKwargs, { enable_thinking: false });
       // Worker unavailable under happy-dom: element degrades, stays mounted.
       assert.ok(host.querySelector("site-chat"));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("mounts the tiered pick and passes smaller tiers on the element", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: true, json: async () => TIERED });
+    try {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const { element, plan } = await mountAssistant({
+        target: host,
+        manifestUrl: "/models/model-manifest.json",
+        hardware: HW_MOBILE,
+      });
+      assert.equal(plan.entryId, "qwen3-0.6b");
+      assert.equal(element.getAttribute("model"), "Qwen3-0.6B-q4f16_1-MLC");
+      assert.equal(element.getAttribute("onnx"), "onnx-community/Qwen3-0.6B-ONNX");
+      assert.equal(element.entryRequirements.minDeviceMemoryGB, 1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("mounts an hw-mismatch element with a Try-anyway tier", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: true, json: async () => TIERED });
+    try {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const { element, plan } = await mountAssistant({
+        target: host,
+        manifestUrl: "/models/model-manifest.json",
+        hardware: HW_TINY,
+      });
+      assert.ok(plan.hwMismatch);
+      assert.ok(element.hwMismatch.reasons.length > 0);
+      assert.equal(element.forceTier.entryId, "qwen3-0.6b");
+      assert.equal(element.getAttribute("gguf"), null);
+      assert.match(element.readyState, /hw-mismatch/);
+      // The element renders the blocking explanation, no worker spawn needed.
+      assert.ok(element.shadowRoot.querySelector('[data-hw-error="1"]'));
     } finally {
       globalThis.fetch = realFetch;
     }

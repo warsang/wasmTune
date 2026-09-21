@@ -15,6 +15,7 @@
 import { existsSync, openSync, readSync, closeSync, statSync, createReadStream } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { manifestEntries } from "./chat/hardware.mjs";
 
 export const SINGLE_FILE_WARN_BYTES = 2 * 1024 ** 3;
 // Browser blob slices fail around ~2GB (saw NotReadableError); a tensor's
@@ -232,7 +233,7 @@ export async function checkServing({ cwd = process.cwd(), config, fetchImpl = gl
   const webDir = path.resolve(cwd, config?.output?.webDir ?? "./public/models");
   const manifestPath = path.join(webDir, "model-manifest.json");
   if (!existsSync(manifestPath)) {
-    return { ok: false, errors: [`no model-manifest.json at ${manifestPath} — run "finetune convert" first`], warnings, details };
+    return { ok: false, errors: [`no model-manifest.json at ${manifestPath} — run "wasmtune convert" first`], warnings, details };
   }
   let manifest;
   try {
@@ -244,21 +245,44 @@ export async function checkServing({ cwd = process.cwd(), config, fetchImpl = gl
   details.manifest = manifestPath;
   details.version = manifest.version ?? null;
 
+  const entries = manifestEntries(manifest);
+  const multi = entries.length > 1;
   const artifacts = [];
-  if (manifest.artifacts?.gguf) {
-    const g = manifest.artifacts.gguf;
-    artifacts.push({ kind: "gguf", url: typeof g === "string" ? g : g?.url });
-  }
-  if (manifest.artifacts?.mlc) artifacts.push({ kind: "mlc", url: manifest.artifacts.mlc.config });
-  if (manifest.artifacts?.onnx) artifacts.push({ kind: "onnx", url: manifest.artifacts.onnx });
+  entries.forEach((entry, i) => {
+    const a = entry.artifacts ?? {};
+    const tag = multi ? `[${entry.id ?? `model-${i}`}] ` : "";
+    const hasAny = ["gguf", "mlc", "onnx", "webllm"].some((k) => a[k]);
+    if (!hasAny) {
+      errors.push(`${tag}entry "${entry.id ?? i}" has no browser artifacts (gguf/mlc/onnx/webllm) — this tier can never load`);
+    }
+    if (a.gguf) {
+      const g = a.gguf;
+      artifacts.push({ kind: "gguf", tag, first: i === 0, entryId: entry.id, url: typeof g === "string" ? g : g?.url });
+    }
+    if (a.mlc) artifacts.push({ kind: "mlc", tag, first: i === 0, entryId: entry.id, url: a.mlc.config });
+    if (a.onnx) {
+      const id = typeof a.onnx === "string" ? a.onnx : (a.onnx?.id ?? a.onnx?.repo ?? null);
+      // Pretrained entries reference an HF/ONNX repo id, not a served file.
+      const remoteId = !!id && !id.startsWith("/") && !/^https?:\/\//.test(id);
+      artifacts.push({ kind: "onnx", tag, first: i === 0, entryId: entry.id, url: id, remoteId });
+    }
+    if (a.webllm) details[`webllm${i ? `#${entry.id}` : ""}`] = a.webllm; // prebuilt id: remote, nothing local to check
+  });
 
   const wasmPath = resolveWllamaWasm(cwd);
   details.wllamaWasm = wasmPath;
   if (!wasmPath) warnings.push("@wllama/wllama not installed here — skipping arch-vs-runtime check");
 
   for (const a of artifacts) {
+    const p = a.tag ?? "";
+    const key = (base) => (a.first ? base : `${base}#${a.entryId}`);
     if (!a.url) {
-      errors.push(`${a.kind} artifact has no URL`);
+      errors.push(`${p}${a.kind} artifact has no URL`);
+      continue;
+    }
+    // Remote model ids (pretrained ONNX repos): nothing local to validate.
+    if (a.remoteId) {
+      details[key(`${a.kind}Id`)] = a.url;
       continue;
     }
     // 3. URL resolution.
@@ -266,10 +290,10 @@ export async function checkServing({ cwd = process.cwd(), config, fetchImpl = gl
     if (/^https?:\/\//.test(a.url)) {
       try {
         const res = await fetchImpl(a.url, { method: "HEAD" });
-        if (!res.ok) errors.push(`${a.kind} URL does not resolve: ${a.url} (HTTP ${res.status})`);
-        else details[`${a.kind}Url`] = "remote-ok";
+        if (!res.ok) errors.push(`${p}${a.kind} URL does not resolve: ${a.url} (HTTP ${res.status})`);
+        else details[key(`${a.kind}Url`)] = "remote-ok";
       } catch (e) {
-        errors.push(`${a.kind} URL fetch failed: ${a.url} (${e.message})`);
+        errors.push(`${p}${a.kind} URL fetch failed: ${a.url} (${e.message})`);
       }
       continue;
     }
@@ -283,14 +307,14 @@ export async function checkServing({ cwd = process.cwd(), config, fetchImpl = gl
     }
     local = candidates.find((c) => existsSync(c) && statSync(c).isFile()) ?? null;
     if (!local) {
-      errors.push(`${a.kind} URL does not resolve to a file: ${a.url} (tried ${candidates.join(", ")})`);
+      errors.push(`${p}${a.kind} URL does not resolve to a file: ${a.url} (tried ${candidates.join(", ")})`);
       continue;
     }
-    details[`${a.kind}File`] = local;
+    details[key(`${a.kind}File`)] = local;
 
     if (a.kind !== "gguf") continue;
     const st = statSync(local);
-    details.ggufBytes = st.size;
+    details[key("ggufBytes")] = st.size;
     // Sharded artifacts: every sibling must exist (wllama fetches them all).
     const split = shardSiblings(local);
     if (split) {
@@ -303,13 +327,13 @@ export async function checkServing({ cwd = process.cwd(), config, fetchImpl = gl
         if (!existsSync(fp)) missing.push(name);
         else total += statSync(fp).size;
       }
-      details.ggufShards = { present: Number(split.total) - missing.length, total: Number(split.total), bytes: total };
-      if (missing.length) errors.push(`gguf split missing ${missing.length} shard(s): ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? "…" : ""}`);
+      details[key("ggufShards")] = { present: Number(split.total) - missing.length, total: Number(split.total), bytes: total };
+      if (missing.length) errors.push(`${p}gguf split missing ${missing.length} shard(s): ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? "…" : ""}`);
     }
     // 2. Size policy.
     if (!shardSiblings(local) && st.size > SINGLE_FILE_WARN_BYTES) {
       warnings.push(
-        `gguf is ${(st.size / 1e9).toFixed(2)} GB single-file — tab fetch/OOM risk; ` +
+        `${p}gguf is ${(st.size / 1e9).toFixed(2)} GB single-file — tab fetch/OOM risk; ` +
           `consider llama-gguf-split sharding (wllama loads *-00001-of-*.gguf natively)`,
       );
     }
@@ -317,17 +341,17 @@ export async function checkServing({ cwd = process.cwd(), config, fetchImpl = gl
     let arch;
     try {
       arch = readGgufArchitecture(local);
-      details.ggufArch = arch;
+      details[key("ggufArch")] = arch;
     } catch (e) {
-      errors.push(`cannot read GGUF architecture from ${local}: ${e.message}`);
+      errors.push(`${p}cannot read GGUF architecture from ${local}: ${e.message}`);
       continue;
     }
     if (wasmPath) {
       const supported = await wasmSupportsArch(wasmPath, arch);
-      details.runtimeSupportsArch = supported;
+      details[key("runtimeSupportsArch")] = supported;
       if (!supported) {
         errors.push(
-          `runtime mismatch: GGUF architecture "${arch}" not found in installed wllama WASM — ` +
+          `${p}runtime mismatch: GGUF architecture "${arch}" not found in installed wllama WASM — ` +
             `the model will fail to load in the browser (upgrade @wllama/wllama or pick a supported arch)`,
         );
       }
@@ -356,23 +380,23 @@ export async function checkServing({ cwd = process.cwd(), config, fetchImpl = gl
         })
         .sort((a, b) => b.bytes - a.bytes)
         .slice(0, 3);
-      details.largestTensors = biggest.map((t) => ({ name: t.name, bytes: t.bytes }));
+      details[key("largestTensors")] = biggest.map((t) => ({ name: t.name, bytes: t.bytes }));
       for (const t of biggest) {
         const gb = (t.bytes / 1e9).toFixed(2);
         if (t.bytes > GIANT_TENSOR_ERROR_BYTES) {
           errors.push(
-            `giant tensor "${t.name}" is ~${gb} GB in one tensor — ` +
+            `${p}giant tensor "${t.name}" is ~${gb} GB in one tensor — ` +
               `no split can divide it and browser blob reads fail (saw NotReadableError). ` +
               `Requantize with: llama-quantize --tensor-type <name>=q2_k (or a smaller base model)`,
           );
         } else if (t.bytes > GIANT_TENSOR_WARN_BYTES) {
           warnings.push(
-            `large tensor "${t.name}" is ~${gb} GB — watch browser load memory`,
+            `${p}large tensor "${t.name}" is ~${gb} GB — watch browser load memory`,
           );
         }
       }
     } catch (e) {
-      warnings.push(`tensor scan skipped: ${e.message}`);
+      warnings.push(`${p}tensor scan skipped: ${e.message}`);
     }
   }
   return { ok: errors.length === 0, errors, warnings, details };

@@ -9,6 +9,8 @@
   export let title = "Site assistant";
   export let siteName = null;
   export let workerUrl = null;
+  export let allowForce = false;
+  export let preferModel = null;
   export let chatOpts = {};
 
   /** Programmatic access: bind:this + ref.ask("hi") / ref.element */
@@ -26,6 +28,7 @@
       if (e.type === "site-chat-ready") dispatch("ready", e.detail);
       else if (e.type === "site-chat-error") dispatch("error", e.detail);
       else if (e.type === "site-chat-load-failed") dispatch("load-failed", e.detail);
+      else if (e.type === "site-chat-hw-mismatch") dispatch("hardware-mismatch", e.detail);
     };
     try {
       mounted = await mountAssistant({
@@ -35,6 +38,8 @@
         title,
         siteName,
         workerUrl,
+        allowForce,
+        preferModel,
         onEvent,
         ...(chatOpts ?? {}),
       });

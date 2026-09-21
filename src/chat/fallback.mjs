@@ -1,5 +1,8 @@
-// wasmtune — runtime capability detection for the chat widget.
-// Order: WebLLM (WebGPU) -> Transformers.js (ONNX, WebGPU/WASM) -> wllama (WASM).
+// wasmtune — runtime capability detection + artifact picking for the chat widget.
+// Order: WebLLM (WebGPU) -> wllama (GGUF, WebGPU or CPU) -> Transformers.js
+// (ONNX, WebGPU or WASM).
+
+import { manifestEntries } from "./hardware.mjs";
 
 export async function detectCapabilities() {
   const webgpu = await hasWebGPU();
@@ -21,11 +24,29 @@ export async function hasWebGPU() {
   }
 }
 
-export function pickArtifact(manifest, caps) {
-  if (caps.webgpu && manifest?.artifacts?.mlc) return { kind: "webllm", ref: manifest.artifacts.mlc };
-  if (manifest?.artifacts?.onnx) return { kind: "transformers", ref: manifest.artifacts.onnx };
-  if (manifest?.artifacts?.gguf) return { kind: "wllama", ref: manifest.artifacts.gguf };
+// Which artifact to load for one manifest entry on this device. The engine
+// preference is unchanged from v1; multi-model manifests just give every
+// entry its own artifacts.
+export function pickArtifactForEntry(entry, caps) {
+  const a = entry?.artifacts ?? {};
+  if (caps?.webgpu) {
+    if (a.mlc) return { kind: "webllm", ref: a.mlc };
+    if (a.webllm) return { kind: "webllm-prebuilt", ref: a.webllm };
+    if (a.gguf) return { kind: "wllama", ref: a.gguf };
+    if (a.onnx) return { kind: "transformers", ref: a.onnx };
+    return { kind: "none", ref: null };
+  }
+  // No WebGPU: ONNX (transformers.js WASM) first — the incumbent behavior —
+  // then GGUF via wllama's CPU path.
+  if (a.onnx) return { kind: "transformers", ref: a.onnx };
+  if (a.gguf) return { kind: "wllama", ref: a.gguf };
   return { kind: "none", ref: null };
+}
+
+// Legacy single-artifact manifests: pick from the primary entry.
+export function pickArtifact(manifest, caps) {
+  const entry = manifestEntries(manifest)[0] ?? { artifacts: {} };
+  return pickArtifactForEntry(entry, caps);
 }
 
 // Resolve a loadable URL from a manifest artifact. GGUF artifacts are

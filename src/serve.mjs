@@ -1,4 +1,4 @@
-// wasmtune — tiny static preview server for `finetune serve`.
+// wasmtune — tiny static preview server for `wasmtune serve`.
 // Serves cwd + webDir model files with COOP/COEP so WebGPU workers + caching behave.
 
 import http from "node:http";

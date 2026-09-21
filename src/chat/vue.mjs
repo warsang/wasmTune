@@ -13,9 +13,11 @@ export const SiteChat = defineComponent({
     title: { type: String, default: "Site assistant" },
     siteName: { type: String, default: null },
     workerUrl: { type: String, default: null },
+    allowForce: { type: Boolean, default: false },
+    preferModel: { type: String, default: null },
     chatOpts: { type: Object, default: () => ({}) },
   },
-  emits: ["ready", "error", "load-failed"],
+  emits: ["ready", "error", "load-failed", "hardware-mismatch"],
   setup(props, { emit, expose }) {
     const host = ref(null);
     const element = ref(null);
@@ -35,6 +37,7 @@ export const SiteChat = defineComponent({
       if (e.type === "site-chat-ready") emit("ready", e.detail);
       else if (e.type === "site-chat-error") emit("error", e.detail);
       else if (e.type === "site-chat-load-failed") emit("load-failed", e.detail);
+      else if (e.type === "site-chat-hw-mismatch") emit("hardware-mismatch", e.detail);
     };
 
     onMounted(async () => {
@@ -46,6 +49,8 @@ export const SiteChat = defineComponent({
           title: props.title,
           siteName: props.siteName,
           workerUrl: props.workerUrl,
+          allowForce: props.allowForce,
+          preferModel: props.preferModel,
           onEvent: onDomEvent,
           ...(props.chatOpts ?? {}),
         });

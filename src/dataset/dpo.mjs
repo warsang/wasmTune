@@ -120,7 +120,7 @@ export function sftToDpoSeed(sftPairs, { maxPairs = 2000, chunks = [] } = {}) {
 // Loop contrasts mined from an eval report: every TUNED completion that
 // looped becomes {prompt, chosen: reference answer, rejected: looped output}.
 // This closes the self-improvement loop: eval failures become DPO data, so
-// the next `finetune train --method dpo` directly suppresses regurgitation
+// the next `wasmtune train --method dpo` directly suppresses regurgitation
 // spirals. Generic — no site content involved.
 export function evalLoopContrasts(report, promptsById, { maxPairs = 200, maxRejectedChars = 1500 } = {}) {
   const out = [];

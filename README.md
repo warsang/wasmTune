@@ -7,7 +7,7 @@ Generic local fine-tuning + WebGPU chat for **any website folder**.
    - NVIDIA Linux/Windows → **Unsloth + TRL + PEFT** (CUDA kernels, fastest).
    - Apple Silicon (M1–M5) → **MLX** via `mlx-lm` / `unsloth-mlx` (unified memory).
 3. `npx wasmtune convert` — merged weights → GGUF + MLC (`q4f16_1`) + ONNX.
-4. Embed `<site-chat>` — **WebLLM (WebGPU) primary**, Transformers.js and wllama fallback. Served locally, no server inference.
+4. Embed `<site-chat>` — **WebLLM (WebGPU) primary**, Transformers.js and wllama fallback. Served locally, no server inference. Ship several tiers (`models[]`) and the browser loads the best one its hardware can run.
 
 Real Unsloth is CUDA-only and does not train on Metal — that is why this
 package routes by platform instead of pretending one backend fits all.
@@ -116,7 +116,7 @@ import { SiteChat } from 'wasmtune/chat/react';
 <SiteChat on:ready={console.log} on:load-failed={report} />
 ```
 
-See `templates/wasmtune.config.example.json` and `finetune.config.schema.md` (below).
+See `templates/wasmtune.config.example.json` and the Config section below.
 
 ## Config
 
@@ -142,15 +142,77 @@ See `templates/wasmtune.config.example.json` and `finetune.config.schema.md` (be
 }
 ```
 
+Serve several model tiers and let the browser pick the best one its hardware
+can run (see "Model tiers & hardware detection"):
+
+```jsonc
+{
+  "dataDir": "./docs",
+  "models": [
+    // trained by the pipeline (one run per entry, artifacts under .finetune/<slug>/)
+    { "model": "google/gemma-4-E4B-it", "label": "Gemma 4 E4B" },
+    // served as-is from its public browser build — no training, no GPU
+    { "model": "Qwen/Qwen3-0.6B", "trained": false },
+    // optional: a direct .gguf URL for a custom pretrained tier
+    { "model": "Qwen/Qwen3-1.7B", "trained": false, "gguf": "https://example.com/qwen3-1.7b.Q4_K_M.gguf" }
+  ],
+  "model": "google/gemma-4-E4B-it", // optional; defaults to models[0]
+  "method": "sft",
+  "chat": { "temperature": 0.3 }
+}
+```
+
 | Key | Meaning |
 |---|---|
 | `dataDir` | Folder crawled for FT data (md/mdx/txt/html/js/mjs/json). |
 | `dataset.siteName` | Display name used in generated questions/prompts (default: folder name). |
 | `dataset.summary` | One-line site summary for conversational seeds (default: inferred). |
 | `model` | Base model HF id. Must be on the small-model allowlist (`npx wasmtune models`). |
+| `models` | Optional tier list. `{ model, label?, trained?, gguf?, onnx?, webllm?, chat?, requirements? }`. `trained: false` entries are published from their public browser artifacts (no training). `requirements` overrides the lib's known hardware needs (e.g. `{ "minDeviceMemoryGB": 6 }`). |
 | `method` | `sft` \| `dpo` \| `orpo` \| `grpo`. DPO/ORPO need triplets (`dpo.pairsFile` + auto seeds + eval-mined loops); GRPO needs `grpo.rewardFile`. ORPO needs no reference model — prefer it on memory-tight Macs. |
 | `training.backend` | `auto` (recommended) \| `unsloth` \| `mlx`. `auto` picks MLX on darwin-arm64, Unsloth when CUDA is present. |
-| `chat` | Widget decoding guardrails: `temperature` (default 0.3), `repetitionPenalty` (default 1.15), `maxTokens` (256), `systemPrompt` (default: brief, honesty-first prompt). Passed to `<site-chat>` / worker. |
+| `chat` | Widget decoding guardrails: `temperature` (default 0.3), `repetitionPenalty` (default 1.15), `maxTokens` (256), `systemPrompt` (default: brief, honesty-first prompt). Per-entry `models[].chat` wins over it. Passed to `<site-chat>` / worker. |
+
+## Model tiers & hardware detection
+
+Fine-tuning and serving are different hardware problems: the machine that
+trains a 4B model is not the phone that opens your site. With `models[]` the
+manifest ships several tiers, and the browser picks the **highest tier that
+fits the visitor's device** — no server, no per-visitor config.
+
+What the browser can know (and what it can't):
+
+| Signal | Source | Notes |
+|---|---|---|
+| WebGPU | `navigator.gpu.requestAdapter()` | required for WebLLM and for models >1B |
+| Device memory | `navigator.deviceMemory` | **Chromium-only, capped at 8**; Safari/Firefox fall back to a conservative estimate from cores + WebGPU + mobile flag |
+| Cores / mobile | `hardwareConcurrency`, `userAgentData.mobile` | |
+| GPU info | adapter `info` + `limits.maxBufferSize` | weak proxy, only used as a tiebreaker |
+
+Per-model requirements come from the lib's own allowlist knowledge
+(`src/models.mjs`: params, VRAM footprint, tier, mobile/CPU viability) — so
+any allowlisted base model is automatically rated, whether it was fine-tuned
+here or served pretrained. An entry's explicit `requirements` always wins;
+for unknown bases the artifact byte size is used with a safety overhead.
+
+Behavior:
+
+- **Fits** → the best tier loads (MLC/WebLLM over WebGPU, else GGUF via
+  wllama, else ONNX via Transformers.js).
+- **Nothing fits** → the chat shows a blocking "hardware is below its
+  requirements" message with the detected specs and a **Try anyway** button
+  (opt-in, may OOM the tab). The app never silently falls back to a
+  different model.
+- **Chosen tier fails to load** (e.g. GPU OOM) → the load-failure banner
+  gains a **Load smaller model** button when a smaller tier exists.
+- Events: `site-chat-hw-mismatch` / `onHardwareMismatch` (React/Vue/Svelte)
+  carry `{ reasons, required, detected }`. `mountAssistant({ allowForce })`
+  picks the smallest tier up front, `preferModel` pins an entry id.
+
+Limits to be honest about: browsers do not expose true RAM, so detection is
+heuristic and deliberately conservative (a false "fits" would crash the
+tab). `deviceMemory` is capped at 8 GB and missing on Safari/Firefox. The
+"Try anyway" path exists for exactly these edges.
 
 ## Small-model allowlist
 
@@ -173,9 +235,14 @@ Gemma-2-2B, Gemma-3-1B, Gemma-4-E4B.
 - `models` — print the allowlist.
 - `dataset` — crawl `dataDir` → `.finetune/dataset.{sft,dpo,grpo}.jsonl` + report.
   `--synth provider:model` adds LLM-generated QA pairs.
-- `train` — bootstrap `.finetune-venv`, pip install, run SFT/DPO/GRPO.
-- `eval` — holdout prompts → base vs tuned scores + regression gate.
-- `convert` — merge LoRA → GGUF + MLC + ONNX manifest (wraps `mlc_llm`, `llama.cpp`, `optimum`; all optional, loud-skip if missing).
+- `train` — bootstrap `.finetune-venv`, pip install, run SFT/DPO/GRPO. With
+  `models[]`, runs once per `trained` entry (artifacts under `.finetune/<slug>/`;
+  `trained: false` tiers are skipped).
+- `eval` — holdout prompts → base vs tuned scores + regression gate (per trained tier).
+- `convert` — merged LoRA → GGUF + MLC + ONNX, then writes one manifest with a
+  `models[]` tier list (wraps `mlc_llm`, `llama.cpp`, `optimum`; all optional,
+  loud-skip if missing). Pretrained tiers are published from their public
+  browser ids without conversion.
 - `serve` — static preview server for the chat widget + converted model.
 - `build` — one-shot `dataset → train → eval → convert`. The eval gate
   throws on regression, so a bad model fails the build instead of shipping.
@@ -185,7 +252,7 @@ Gemma-2-2B, Gemma-3-1B, Gemma-4-E4B.
 ```jsonc
 // your-site/package.json
 {
-  "devDependencies": { "wasmtune": "^0.1.0" },
+  "devDependencies": { "wasmtune": "^0.2.0" },
   "scripts": {
     "prebuild": "wasmtune build",
     "build": "vite build"
@@ -228,12 +295,38 @@ Gemma-2-2B, Gemma-3-1B, Gemma-4-E4B.
 `src/chat/worker.js` holds inference off the main thread.
 Order: WebLLM (WebGPU) → wllama GGUF → Transformers.js ONNX → optional cloud URL.
 Weights cache in IndexedDB/OPFS; first load downloads once, then offline.
+`src/chat/hardware.mjs` detects the device and picks the manifest tier that
+fits; the worker re-checks at init (standalone `<site-chat>` usage included).
 Artifact load failures surface as a blocking banner (attempted URL, size,
-error; retry / opt-in base buttons) — the widget never silently swaps in a
-different model. Displayed replies are thinking-stripped and loop-guarded.
+error; retry / smaller-tier / opt-in base buttons) — the widget never silently
+swaps in a different model. Displayed replies are thinking-stripped and
+loop-guarded. Manifest shape (v2):
+
+```jsonc
+{
+  "version": "ab12cd34",
+  "models": [{
+    "id": "gemma-4-e4b", "label": "Gemma 4 E4B",
+    "base": "google/gemma-4-E4B-it", "source": "tuned",
+    "artifacts": {
+      "gguf": { "url": "/models/gemma-4-e4b/m.Q4_K_M.ab12cd34.gguf", "sha256": "…", "bytes": 123 },
+      "mlc": { "config": "/models/gemma-4-e4b/mlc/mlc-chat-config.json", "lib": "/models/gemma-4-e4b/mlc/lib.wasm" },
+      "onnx": "/models/gemma-4-e4b/onnx"
+    },
+    "requirements": { "minDeviceMemoryGB": 6 },   // optional override
+    "chat": { "templateKwargs": { "enable_thinking": false } }
+  }],
+  "artifacts": { /* legacy mirror of models[0] */ }
+}
+```
 
 ## Known limitations
 
+- **Hardware detection is heuristic.** Browsers don't expose true RAM:
+  `navigator.deviceMemory` is Chromium-only and capped at 8 GB, and
+  Safari/Firefox fall back to an estimate from cores + WebGPU + mobile flag.
+  Detection is conservative by design; "Try anyway" covers the edges and the
+  load-failure banner offers the next-smaller tier.
 - **DPO on MLX is experimental.** The pipeline (auto seeds → merge →
   `unsloth_mlx` DPOTrainer → adapters → eval loop mining) runs end-to-end,
   but `unsloth-mlx~=0.3.5`'s reference-free DPO loss sits at chance
@@ -245,6 +338,8 @@ different model. Displayed replies are thinking-stripped and loop-guarded.
   test model into loops within 40 steps, while default-lr held steady
   (looped=0, small positive delta).
 - SFT is the validated path for facts; use ORPO for shaping once SFT lands.
+- Multi-tier training runs are sequential and each tier gets its own dataset
+  build under `.finetune/<slug>/` — fine for 2-3 tiers, linear cost beyond.
 
 ## License
 

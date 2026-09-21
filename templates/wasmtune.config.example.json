@@ -1,6 +1,10 @@
 {
   "dataDir": "./docs",
   "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "models": [
+    { "model": "Qwen/Qwen2.5-1.5B-Instruct", "label": "Qwen2.5 1.5B", "trained": true },
+    { "model": "Qwen/Qwen3-0.6B", "trained": false }
+  ],
   "method": "sft",
   "training": {
     "backend": "auto",

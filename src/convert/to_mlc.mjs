@@ -4,7 +4,7 @@
 //     Install: pip install --pre -f https://mlc.ai/wheels mlc_llm_nightly_cpu mlc_ai_nightly_cpu
 //   - GGUF: llama.cpp convert_hf_to_gguf.py + llama-quantize (wllama/Ollama).
 //   - ONNX: `optimum-cli export onnx` for Transformers.js fallback.
-// The manifest lets <site-chat> pick the best available artifact.
+// The manifest lets <site-chat> pick the best fitting artifact per device.
 
 import { existsSync, createReadStream } from "node:fs";
 import { mkdir, writeFile, rename, rm } from "node:fs/promises";
@@ -12,6 +12,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { slugifyModel } from "../models.mjs";
 
 const execAsync = promisify(execFile);
 
@@ -60,31 +61,69 @@ async function pythonHasMlc() {
   return null;
 }
 
-export async function convertModel({ mergedDir, webDir, modelId, quantization = "q4f16_1", device = "webgpu", convTemplate = "auto", chat = {} } = {}) {
-  await mkdir(webDir, { recursive: true });
-  const manifest = {
-    base: modelId,
-    created: new Date().toISOString(),
-    artifacts: {},
-    notes: [],
-  };
-  // Widget decoding hints (generic): template kwargs for hybrid-reasoning
-  // models, generation guardrails. Only the serializable subset is stored.
-  if (chat && typeof chat === "object") {
-    const { templateKwargs, temperature, repetitionPenalty, presencePenalty, frequencyPenalty, maxTokens, topP } = chat;
-    const chatOut = {};
-    if (templateKwargs && typeof templateKwargs === "object") chatOut.templateKwargs = templateKwargs;
-    for (const [k, v] of Object.entries({ temperature, repetitionPenalty, presencePenalty, frequencyPenalty, maxTokens, topP })) {
-      if (Number.isFinite(Number(v))) chatOut[k] = Number(v);
-    }
-    if (Object.keys(chatOut).length) manifest.chat = chatOut;
+// Serializable chat hints (subset of config.chat / entry.chat).
+function chatHints(chat) {
+  if (!chat || typeof chat !== "object") return null;
+  const { templateKwargs, temperature, repetitionPenalty, presencePenalty, frequencyPenalty, maxTokens, topP } = chat;
+  const out = {};
+  if (templateKwargs && typeof templateKwargs === "object") out.templateKwargs = templateKwargs;
+  for (const [k, v] of Object.entries({ temperature, repetitionPenalty, presencePenalty, frequencyPenalty, maxTokens, topP })) {
+    if (Number.isFinite(Number(v))) out[k] = Number(v);
   }
+  return Object.keys(out).length ? out : null;
+}
+
+// Build one manifest entry for an untrained (pretrained) allowlist model:
+// served straight from its public browser artifacts, no local conversion.
+export function pretrainedEntry({ model, label = null, gguf = null, chat = null, requirements = null, onnx = null, webllm = null }) {
+  const artifacts = {};
+  if (webllm) artifacts.webllm = webllm;
+  if (onnx) artifacts.onnx = onnx;
+  if (gguf) artifacts.gguf = gguf;
+  return {
+    id: slugifyModel(model),
+    label: label ?? model,
+    base: model,
+    source: "pretrained",
+    artifacts,
+    ...(chatHints(chat) ? { chat: chatHints(chat) } : {}),
+    ...(requirements ? { requirements } : {}),
+  };
+}
+
+export async function convertModel({
+  mergedDir,
+  webDir,
+  modelId,
+  quantization = "q4f16_1",
+  device = "webgpu",
+  convTemplate = "auto",
+  chat = {},
+  subdir = null, // per-entry artifact directory (multi-model builds)
+  label = null,
+  source = "tuned",
+  requirements = null,
+  writeManifest = true,
+} = {}) {
+  await mkdir(webDir, { recursive: true });
+  const outDir = subdir ? path.join(webDir, subdir) : webDir;
+  const entry = {
+    id: slugifyModel(modelId),
+    label: label ?? modelId,
+    base: modelId,
+    source,
+    artifacts: {},
+    ...(chatHints(chat) ? { chat: chatHints(chat) } : {}),
+    ...(requirements ? { requirements } : {}),
+  };
+  const notes = [];
+  const rel = (p) => "/" + path.relative(webDir, p).split(path.sep).join("/");
 
   // 1. MLC — the WebLLM primary artifact.
   // Documented flow: convert_weight -> gen_config -> compile.
   const mlc = (await which("mlc_llm")) ?? (await pythonHasMlc());
   if (mlc && mergedDir && existsSync(mergedDir)) {
-    const mlcDir = path.join(webDir, "mlc");
+    const mlcDir = path.join(outDir, "mlc");
     try {
       await mkdir(mlcDir, { recursive: true });
       const run = typeof mlc === "string" && mlc !== "python-mlc"
@@ -98,13 +137,12 @@ export async function convertModel({ mergedDir, webDir, modelId, quantization = 
       const libOut = path.join(mlcDir, "lib.wasm");
       await run(["compile", cfgPath, "--device", device, "-o", libOut]);
       const buildId = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15);
-      manifest.artifacts.mlc = { dir: mlcDir, config: cfgPath, lib: libOut, quantization, device, buildId };
-      manifest.version ??= buildId;
+      entry.artifacts.mlc = { config: rel(cfgPath), lib: rel(libOut), quantization, device, buildId };
     } catch (e) {
-      manifest.notes.push(`mlc failed: ${String(e.message ?? e).slice(0, 300)}`);
+      notes.push(`mlc failed: ${String(e.message ?? e).slice(0, 300)}`);
     }
-  } else {
-    manifest.notes.push("mlc skipped: mlc_llm not installed (pip install --pre -f https://mlc.ai/wheels mlc_llm_nightly_cpu mlc_ai_nightly_cpu)");
+  } else if (source !== "pretrained") {
+    notes.push("mlc skipped: mlc_llm not installed (pip install --pre -f https://mlc.ai/wheels mlc_llm_nightly_cpu mlc_ai_nightly_cpu)");
   }
 
   // 2. GGUF (llama.cpp) — feeds Ollama + wllama fallback.
@@ -116,35 +154,70 @@ export async function convertModel({ mergedDir, webDir, modelId, quantization = 
     : null;
   if (quantize && converter && existsSync(converter) && mergedDir && existsSync(mergedDir)) {
     try {
-      const f16 = path.join(webDir, "model.f16.gguf");
+      const f16 = path.join(outDir, "model.f16.gguf");
       await execAsync("python3", [converter, mergedDir, "--outfile", f16, "--outtype", "f16"]);
-      const out = path.join(webDir, "model.Q4_K_M.gguf");
+      const out = path.join(outDir, "model.Q4_K_M.gguf");
       await execAsync(quantize, [f16, out, "Q4_K_M"]);
       await rm(f16, { force: true }); // 8GB intermediate; reproducible from mergedDir
       const g = await hashAndRename(out, webDir);
-      manifest.artifacts.gguf = { url: g.url, sha256: g.sha256, bytes: g.bytes };
-      manifest.version = g.short;
+      entry.artifacts.gguf = { url: g.url, sha256: g.sha256, bytes: g.bytes };
     } catch (e) {
-      manifest.notes.push(`gguf failed: ${String(e.message ?? e).slice(0, 300)}`);
+      notes.push(`gguf failed: ${String(e.message ?? e).slice(0, 300)}`);
     }
-  } else {
-    manifest.notes.push("gguf skipped: need llama-quantize on PATH and LLAMA_CPP_DIR pointing at a llama.cpp checkout");
+  } else if (source !== "pretrained") {
+    notes.push("gguf skipped: need llama-quantize on PATH and LLAMA_CPP_DIR pointing at a llama.cpp checkout");
   }
 
   // 3. ONNX — Transformers.js fallback.
   const optimum = await which("optimum-cli");
-  if (optimum) {
+  if (optimum && mergedDir && existsSync(mergedDir)) {
     try {
-      const out = path.join(webDir, "onnx");
+      const out = path.join(outDir, "onnx");
       await execAsync(optimum, ["export", "onnx", "--model", mergedDir, out]);
-      manifest.artifacts.onnx = out;
+      entry.artifacts.onnx = rel(out);
     } catch (e) {
-      manifest.notes.push(`onnx skipped: ${e.message}`);
+      notes.push(`onnx skipped: ${e.message}`);
     }
-  } else {
-    manifest.notes.push("onnx skipped: optimum-cli not installed (pip install optimum[onnxruntime] for Transformers.js output)");
+  } else if (source !== "pretrained") {
+    notes.push("onnx skipped: optimum-cli not installed (pip install optimum[onnxruntime] for Transformers.js output)");
   }
 
+  const version = entry.artifacts.gguf?.sha256?.slice(0, 8)
+    ?? entry.artifacts.mlc?.buildId
+    ?? new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15);
+  const manifest = {
+    base: modelId,
+    created: new Date().toISOString(),
+    version,
+    models: [entry],
+    artifacts: entry.artifacts, // legacy mirror of models[0]
+    notes,
+  };
+  if (entry.chat) manifest.chat = entry.chat; // legacy chat location
+
+  let manifestPath = null;
+  if (writeManifest) {
+    manifestPath = path.join(webDir, "model-manifest.json");
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  }
+  return { manifestPath, manifest, entry, notes };
+}
+
+// Write a combined multi-model manifest (models[] + legacy mirror of the
+// primary entry + flattened notes).
+export async function writeModelsManifest({ webDir, entries, notes = [] }) {
+  await mkdir(webDir, { recursive: true });
+  const primary = entries.find((e) => e.source === "tuned") ?? entries[0] ?? null;
+  const version = primary?.artifacts?.gguf?.sha256?.slice(0, 8)
+    ?? primary?.artifacts?.mlc?.buildId
+    ?? new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15);
+  const manifest = {
+    version,
+    created: new Date().toISOString(),
+    models: entries,
+    ...(primary ? { base: primary.base ?? null, artifacts: primary.artifacts, ...(primary.chat ? { chat: primary.chat } : {}) } : {}),
+    notes,
+  };
   const manifestPath = path.join(webDir, "model-manifest.json");
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   return { manifestPath, manifest };
