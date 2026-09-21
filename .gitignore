@@ -6,3 +6,5 @@ coverage/
 *.tgz
 *.gguf
 .DS_Store
+__pycache__/
+*.pyc
