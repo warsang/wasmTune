@@ -1,0 +1,8 @@
+node_modules/
+.finetune/
+.finetune-*/
+.finetune-venv/
+coverage/
+*.tgz
+*.gguf
+.DS_Store

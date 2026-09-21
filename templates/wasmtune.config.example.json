@@ -1,0 +1,40 @@
+{
+  "dataDir": "./docs",
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "method": "sft",
+  "training": {
+    "backend": "auto",
+    "lora": { "r": 16, "alpha": 16, "dropout": 0.05, "targetModules": "auto" },
+    "quantization": "q4",
+    "epochs": 2,
+    "batchSize": 2,
+    "gradAccum": 4,
+    "lr": 0.0002,
+    "maxSeqLen": 2048,
+    "numLayers": 16,
+    "gradCheckpoint": false,
+    "seed": 42,
+    "maxSteps": 0
+  },
+  "dpo": { "pairsFile": "./.finetune/dpo_pairs.jsonl", "beta": 0.1 },
+  "grpo": { "rewardFile": "./rewards.mjs", "numGenerations": 4 },
+  "dataset": {
+    "siteName": null,
+    "summary": null,
+    "maxPairs": 5000,
+    "synth": null,
+    "synthMaxChunks": 200
+  },
+  "eval": { "failOnRegression": true, "judge": null },
+  "chat": {
+    "temperature": 0.3,
+    "repetitionPenalty": 1.15,
+    "presencePenalty": 0.3,
+    "frequencyPenalty": 0.5,
+    "maxTokens": 256,
+    "topP": 0.9,
+    "systemPrompt": null,
+    "templateKwargs": {}
+  },
+  "output": { "dir": "./.finetune", "webDir": "./public/models" }
+}

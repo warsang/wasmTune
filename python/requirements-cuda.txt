@@ -1,0 +1,12 @@
+# CUDA (NVIDIA Linux/Windows) training deps — Unsloth + TRL + PEFT.
+# Pins follow the 2026 SOTA stack: Unsloth kernels, TRL trainers, PEFT LoRA.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.3
+unsloth>=2024.11
+trl~=0.13
+peft~=0.14
+transformers>=4.44
+datasets>=2.20
+accelerate>=0.33
+bitsandbytes>=0.43
+huggingface-hub>=0.24

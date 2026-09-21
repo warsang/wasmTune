@@ -1,0 +1,7 @@
+# Apple Silicon (M1-M5) training deps — MLX + Unsloth-compatible API.
+# Real Unsloth is CUDA-only; unsloth-mlx mirrors its FastLanguageModel API
+# on top of Apple's MLX framework. mlx-lm is the stable fallback.
+mlx-lm>=0.20
+unsloth-mlx~=0.3.5
+datasets>=2.20
+huggingface-hub>=0.24

@@ -1,0 +1,72 @@
+{
+  "name": "wasmtune",
+  "version": "0.1.0",
+  "description": "Fine-tune a small LLM on your website's own pages (local LoRA/QLoRA via Unsloth on NVIDIA or MLX on Apple Silicon) and embed it as a WebGPU chat window. Generic — works with any static site folder.",
+  "type": "module",
+  "license": "MIT",
+  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/warsang/wasmTune.git"
+  },
+  "keywords": [
+    "wasmtune",
+    "wasm",
+    "llm",
+    "fine-tune",
+    "finetune",
+    "lora",
+    "qlora",
+    "unsloth",
+    "mlx",
+    "webgpu",
+    "webllm",
+    "rag-alternative"
+  ],
+  "bin": {
+    "wasmtune": "./bin/wasmtune.mjs",
+    "finetune": "./bin/wasmtune.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./chat": "./src/chat/index.mjs",
+    "./chat/react": "./src/chat/react.jsx",
+    "./chat/vue": "./src/chat/vue.mjs",
+    "./chat/svelte": "./src/chat/SiteChat.svelte",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@wllama/wllama": ">=3.0.0",
+    "@mlc-ai/web-llm": ">=0.2.0",
+    "react": ">=17",
+    "vue": ">=3",
+    "svelte": ">=4"
+  },
+  "peerDependenciesMeta": {
+    "@wllama/wllama": { "optional": true },
+    "@mlc-ai/web-llm": { "optional": true },
+    "react": { "optional": true },
+    "vue": { "optional": true },
+    "svelte": { "optional": true }
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "python/",
+    "templates/",
+    "Dockerfile.cuda",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "happy-dom": "^20.14.3"
+  }
+}

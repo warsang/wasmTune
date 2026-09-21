@@ -1,0 +1,10 @@
+# wasmtune CUDA build — reproducible NVIDIA training.
+FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y python3 python3-venv python3-pip nodejs npm && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+COPY python/requirements-cuda.txt /tmp/requirements-cuda.txt
+RUN pip install -r /tmp/requirements-cuda.txt
+COPY . /opt/wasmtune
+ENTRYPOINT ["node", "/opt/wasmtune/bin/wasmtune.mjs"]
+CMD ["--help"]
