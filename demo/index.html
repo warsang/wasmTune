@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>wasmtune demo — local fine-tuning + WebGPU chat for any static site</title>
+  <meta name="description" content="A static docs site with a wasmtune chat widget running entirely on-device over WebGPU. The browser picks the biggest model tier its own hardware can run." />
+  <link rel="stylesheet" href="./site.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0f14'/%3E%3Cpath d='M7 17h5l2-5 4 10 2-5h5' stroke='%2334d399' stroke-width='2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div class="demo-banner">
+    <div class="demo-banner-inner">
+      <strong>This is the wasmtune demo.</strong>
+      The page below is a throwaway static docs site. The chat widget in the corner is the real
+      <code>&lt;site-chat&gt;</code> element, running on your GPU with no server behind it.
+    </div>
+  </div>
+
+  <!-- ══════════════ the "dummy site" ══════════════ -->
+  <div class="site">
+    <header class="site-head">
+      <div class="site-head-inner">
+        <a class="brand" href="#top">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>
+          Lumen
+        </a>
+        <nav class="site-nav">
+          <a href="#quickstart">Quickstart</a>
+          <a href="#api">API</a>
+          <a href="#limits">Rate limits</a>
+          <a href="#billing">Billing</a>
+          <a href="#trouble">Troubleshooting</a>
+        </nav>
+        <span class="site-version">v2.4 · docs</span>
+      </div>
+    </header>
+
+    <div class="site-body">
+      <aside class="site-side">
+        <div class="side-group">Getting started</div>
+        <a href="#quickstart">Quickstart</a>
+        <a href="#install">Install the SDK</a>
+        <a href="#first">Your first query</a>
+        <div class="side-group">Core</div>
+        <a href="#api">Write API</a>
+        <a href="#query">Query language</a>
+        <a href="#retention">Retention</a>
+        <div class="side-group">Operations</div>
+        <a href="#limits">Rate limits</a>
+        <a href="#billing">Billing</a>
+        <a href="#trouble">Troubleshooting</a>
+      </aside>
+
+      <main class="site-main" id="top">
+        <h1>Lumen <span class="dim">— time-series store for edge devices</span></h1>
+        <p class="lede">
+          Lumen ingests metrics from constrained devices and keeps them queryable for 13 months.
+          This documentation site is ordinary static HTML. The assistant in the corner is not:
+          it runs a language model <em>in this tab</em>, on this GPU, with no inference server anywhere.
+        </p>
+
+        <h2 id="quickstart">Quickstart</h2>
+        <p>Install the SDK and point it at a project. There is no server to deploy.</p>
+        <pre><code>npm i @lumen/sdk
+lumen init --project my-project
+lumen push --config lumen.config.ts</code></pre>
+        <p>
+          <code>lumen init</code> writes a project manifest, generates a write key scoped to that project,
+          and creates the ingest endpoint. Keys are shown once and stored in
+          <code>~/.config/lumen/credentials.json</code>.
+        </p>
+
+        <h2 id="api">Write API</h2>
+        <p>Send one JSON object per measurement. Batches are newline-delimited JSON, capped at 1000 records.</p>
+        <pre><code>curl https://ingest.lumen.dev/v2/write \
+  -H "Authorization: Bearer $LUMEN_KEY" \
+  -H "Content-Type: application/x-ndjson" \
+  --data-binary @metrics.ndjson</code></pre>
+        <p>
+          A <code>200</code> means the batch was durably queued, not that every point parsed. Per-record
+          rejections arrive in the <code>/v2/ingest-report</code> response and in the project log.
+        </p>
+
+        <h2 id="limits">Rate limits</h2>
+        <p>
+          Limits are per project, per minute, and burst is <code>limit × 1.5</code>. Exceeding either returns
+          <code>429</code> with a <code>Retry-After</code> header. Free projects are capped at 1,000 writes
+          and 30 days of retention; paid projects raise both on request.
+        </p>
+
+        <h2 id="billing">Billing</h2>
+        <p>
+          Usage is billed per million points ingested, monthly, in arrears. There is no egress charge and no
+          charge for queries. Invoices are issued on the first of the month and cover the previous calendar
+          month. Deleting a project removes its points immediately; the invoice is not adjusted.
+        </p>
+
+        <h2 id="trouble">Troubleshooting</h2>
+        <p><strong>Writes return 202 but no data appears.</strong> Query the same window with
+        <code>?consistency=strong</code>; the default is eventual and can lag a few seconds.</p>
+        <p><strong>Device clocks drift.</strong> Lumen rejects points more than 24 hours in the past. Send
+        <code>X-Lumen-Offset-Ms</code> to correct for a known device offset.</p>
+      </main>
+    </div>
+
+    <footer class="site-foot">Lumen is a fictional product. This page exists to host a demo widget.</footer>
+  </div>
+
+  <!-- ══════════════ the chat widget target ══════════════ -->
+  <aside class="chat-dock">
+    <div id="chat"></div>
+    <p class="chat-foot">
+      Serving locally · no server · nothing leaves this tab<br />
+      <a href="https://github.com/warsang/wasmTune#readme" target="_blank" rel="noopener">how this works →</a>
+    </p>
+  </aside>
+
+  <!-- ══════════════ demo instrumentation ══════════════ -->
+  <section class="panel" id="panel">
+    <div class="panel-head">
+      <h2>Model-tier selection</h2>
+      <p>
+        This is the part that is hard to fake. The manifest below ships six model tiers; the browser
+        measures its own hardware and loads the biggest one it can actually run. Nothing about the
+        visitor is configured in advance.
+      </p>
+    </div>
+
+    <div class="panel-grid">
+      <div class="hw">
+        <div class="hw-head">
+          <h3>Your hardware <span class="how" id="hw-how">detected in this tab</span></h3>
+          <button class="mini" id="use-real" type="button" hidden>← use my real device</button>
+        </div>
+        <dl class="hw-list" id="hw-list"></dl>
+        <label class="sim">
+          <span>Simulate another visitor</span>
+          <select id="sim">
+            <option value="">— my real device —</option>
+            <option value="phone">phone, no WebGPU, 4 cores, 2 GB</option>
+            <option value="laptop">laptop, WebGPU, 8 cores, 4 GB</option>
+            <option value="desktop">desktop, WebGPU, 16 cores, 8 GB</option>
+            <option value="big">workstation, WebGPU, 32 cores, 8 GB + 4 GB buffer</option>
+          </select>
+        </label>
+        <p class="sim-note" id="sim-note" hidden>
+          Simulated. The picker below is the real <code>wasmtune/chat</code> code running on invented specs.
+        </p>
+      </div>
+
+      <div class="tiers">
+        <div class="tiers-head">
+          <h3>Shipped tiers <span class="how">biggest that fits gets loaded</span></h3>
+          <label class="chk">
+            <input type="checkbox" id="big-tiers" />
+            <span>include 4B tier <em>(+2.2 GB first load)</em></span>
+          </label>
+        </div>
+        <ol class="tier-list" id="tier-list"></ol>
+      </div>
+    </div>
+
+    <div class="picked" id="picked"></div>
+  </section>
+
+  <section class="panel" id="quick">
+    <div class="panel-head">
+      <h2>Put this on your own site</h2>
+      <p>Five lines. Point <code>dataDir</code> at your content folder and the pipeline crawls it.</p>
+    </div>
+    <pre class="code"><code>npx wasmtune dataset &amp;&amp; npx wasmtune train &amp;&amp; npx wasmtune eval &amp;&amp; npx wasmtune convert</code></pre>
+    <pre class="code"><code>&lt;script type="module"&gt;
+  import { mountAssistant } from "wasmtune/chat";
+  await mountAssistant({ target: "#chat", siteName: "Lumen" });
+&lt;/script&gt;</code></pre>
+    <p class="fine">
+      The first visitor downloads the weights once and the browser caches them; every later visit is offline.
+      This page calls exactly the two lines above — the panel above is a few more
+      <code>wasmtune/chat</code> exports (<code>detectHardware</code>, <code>fitReport</code>,
+      <code>pickModel</code>) used for display.
+    </p>
+  </section>
+
+  <section class="panel" id="rag">
+    <div class="panel-head">
+      <h2>wasmtune vs. a RAG / vector-DB setup</h2>
+      <p>Both answer from your content. Only one of them needs a running server to do it.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead><tr><th></th><th class="win-col">wasmtune</th><th>hosted RAG / vector DB</th></tr></thead>
+        <tbody>
+          <tr><th>Inference runs</th><td class="win"><b>in the visitor's tab</b>, over WebGPU</td><td>on your GPU box or vendor's cluster</td></tr>
+          <tr><th>Server bill</th><td class="win"><b>$0</b> — weights are static files on a CDN</td><td>per query, forever, plus a always-on indexer</td></tr>
+          <tr><th>Needs a backend</th><td class="win">no. any static host: Pages, Netlify, S3</td><td>yes: a running service with uptime and scaling</td></tr>
+          <tr><th>Network at answer time</th><td class="win"><b>zero</b> — works in airplane mode</td><td>one round trip per question, minimum</td></tr>
+          <tr><th>User content</th><td class="win">never leaves the device</td><td>shipped to a third party on every question</td></tr>
+          <tr><th>Per-visitor tiering</th><td class="win"><b>automatic</b> from measured hardware</td><td>one server config for everyone</td></tr>
+          <tr><th>Fresh content</th><td>re-crawl + retrain in CI</td><td>re-embed and re-index</td></tr>
+          <tr><th>Ceiling</th><td>0.1B–4B models: short, grounded, honest answers</td><td>unbounded context, citations, arbitrary documents</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fine">
+      <b>Where RAG still wins:</b> your corpus is large or changes hourly, you need verbatim quotes with
+      citations, or answers must span dozens of documents. wasmtune is for the other half of the problem —
+      a small, stable corpus and a question that a 1B model can answer without inventing anything.
+    </p>
+  </section>
+
+  <footer class="panel-foot">
+    <div class="panel-foot-inner">
+      <span>MIT · <a href="https://github.com/warsang/wasmTune" target="_blank" rel="noopener">github.com/warsang/wasmTune</a></span>
+      <span><a href="https://www.npmjs.com/package/wasmtune" target="_blank" rel="noopener">npm i wasmtune</a></span>
+    </div>
+  </footer>
+
+  <script type="module" src="./main.mjs"></script>
+</body>
+</html>

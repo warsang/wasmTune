@@ -3,6 +3,7 @@ node_modules/
 .finetune-*/
 .finetune-venv/
 coverage/
+dist-demo/
 *.tgz
 *.gguf
 .DS_Store

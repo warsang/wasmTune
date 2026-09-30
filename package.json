@@ -58,7 +58,9 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "demo": "vite --config vite.demo.config.js",
+    "build:demo": "vite build --config vite.demo.config.js && vite build --config vite.worker.config.js"
   },
   "engines": {
     "node": ">=20"
@@ -67,6 +69,8 @@
     "access": "public"
   },
   "devDependencies": {
-    "happy-dom": "^20.14.3"
+    "@mlc-ai/web-llm": "^0.2.85",
+    "happy-dom": "^20.14.3",
+    "vite": "^6.3.5"
   }
 }

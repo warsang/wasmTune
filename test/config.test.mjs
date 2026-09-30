@@ -3,12 +3,18 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { normalizeConfig, validateConfig, configFromFlags, resolveConfig, configModels } from "../src/config.mjs";
+
+// fileURLToPath, not URL#pathname: the latter yields a POSIX "/C:/..." string
+// on Windows, which no path.resolve can use, so dataDir "." always looked
+// missing there.
+const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 describe("config", () => {
   it("accepts a minimal valid config shape", () => {
     const cfg = normalizeConfig({ dataDir: ".", model: "Qwen/Qwen2.5-1.5B-Instruct", method: "sft" });
-    const errors = validateConfig(cfg, { cwd: new URL("../../", import.meta.url).pathname, allowLarge: false });
+    const errors = validateConfig(cfg, { cwd: REPO_ROOT, allowLarge: false });
     // dataDir "." exists relative to package dir; only model/method shape asserted here
     assert.ok(!errors.some((e) => e.includes("method")));
     assert.ok(!errors.some((e) => e.includes("allowlist")));
@@ -24,7 +30,7 @@ describe("config", () => {
       method: "sft",
     });
     assert.equal(cfg.model, "google/gemma-4-E4B-it"); // models[0]
-    const errors = validateConfig(cfg, { cwd: new URL("../../", import.meta.url).pathname, allowLarge: false });
+    const errors = validateConfig(cfg, { cwd: REPO_ROOT, allowLarge: false });
     assert.deepEqual(errors, []);
     const entries = configModels(cfg);
     assert.equal(entries.length, 2);
