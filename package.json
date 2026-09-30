@@ -5,9 +5,13 @@
   "type": "module",
   "license": "MIT",
   "author": "",
+  "homepage": "https://warsang.github.io/wasmTune/",
   "repository": {
     "type": "git",
     "url": "https://github.com/warsang/wasmTune.git"
+  },
+  "bugs": {
+    "url": "https://github.com/warsang/wasmTune/issues"
   },
   "keywords": [
     "wasmtune",
@@ -54,6 +58,7 @@
     "src/",
     "python/",
     "templates/",
+    "docs/",
     "Dockerfile.cuda",
     "README.md"
   ],
