@@ -225,7 +225,9 @@ function syncUrl() {
   if (large) q.set("tiers", "large");
   if (preferId && preferId !== DEFAULT_TIER) q.set("tier", preferId);
   const qs = q.toString();
-  history.replaceState(null, "", qs ? `?${qs}${location.hash}` : location.pathname + location.hash);
+  // globalThis.history explicitly — a bare `history` identifier in a browser
+  // module is a collision waiting to happen.
+  globalThis.history.replaceState(null, "", qs ? `?${qs}${location.hash}` : location.pathname + location.hash);
 }
 
 $("sim").onchange = (e) => {
