@@ -46,6 +46,18 @@ let large = false;
 let mounted = null;
 let engine = "not loaded";
 
+// URL state: ?sim=phone shows what a phone visitor gets, ?tiers=large adds the
+// 4B tier, ?tier=<id> pins a specific model. Makes a scenario linkable and
+// shareable instead of something you can only reach by clicking.
+function readUrlState() {
+  const q = new URLSearchParams(location.search);
+  const sim = q.get("sim");
+  if (sim && PROFILES[sim]) { simKey = sim; $("sim").value = sim; }
+  if (q.get("tiers") === "large") { large = true; $("big-tiers").checked = true; }
+  const tier = q.get("tier");
+  if (tier) preferId = tier;
+}
+
 const hwOf = () => (simKey ? PROFILES[simKey] : realHw);
 
 const fmtBytes = (n) => {
@@ -127,7 +139,7 @@ function renderTiers() {
       btn.title = fit.ok
         ? `Load ${entry.label} (~${fmtBytes(r.vramBytes)} on first visit)`
         : `Force ${entry.label} — it does not fit these specs and may fail`;
-      btn.onclick = () => { preferId = entry.id; renderTiers(); renderPicked(); mount(); };
+      btn.onclick = () => { preferId = entry.id; syncUrl(); renderTiers(); renderPicked(); mount(); };
       right.append(btn);
     }
     li.append(right);
@@ -206,9 +218,20 @@ async function mount() {
 }
 
 // ── controls ──────────────────────────────────────────────────────────
+// Keep the address bar in sync so any scenario on screen can be linked to.
+function syncUrl() {
+  const q = new URLSearchParams();
+  if (simKey) q.set("sim", simKey);
+  if (large) q.set("tiers", "large");
+  if (preferId && preferId !== DEFAULT_TIER) q.set("tier", preferId);
+  const qs = q.toString();
+  history.replaceState(null, "", qs ? `?${qs}${location.hash}` : location.pathname + location.hash);
+}
+
 $("sim").onchange = (e) => {
   simKey = e.target.value;
   preferId = DEFAULT_TIER;
+  syncUrl();
   renderHw();
   renderTiers();
   renderPicked();
@@ -218,6 +241,7 @@ $("use-real").onclick = () => { $("sim").value = ""; $("sim").dispatchEvent(new 
 $("big-tiers").onchange = async (e) => {
   large = e.target.checked;
   preferId = DEFAULT_TIER;
+  syncUrl();
   try {
     await loadManifest();
   } catch (err) {
@@ -230,6 +254,7 @@ $("big-tiers").onchange = async (e) => {
 };
 
 (async () => {
+  readUrlState();
   try {
     realHw = await detectHardware();
   } catch {
