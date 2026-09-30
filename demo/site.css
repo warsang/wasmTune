@@ -17,7 +17,6 @@
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
   font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -181,4 +180,4 @@ code.code, .code code { color: var(--fg); }
   .site-main h1 { font-size: 24px; }
   .panel { padding: 16px; margin-top: 20px; }
 }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } html { scroll-behavior: auto; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
