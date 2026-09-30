@@ -52,6 +52,7 @@
         <a href="#trouble">Troubleshooting</a>
       </aside>
 
+
       <main class="site-main" id="top">
         <h1>Lumen <span class="dim">— time-series store for edge devices</span></h1>
         <p class="lede">
@@ -102,19 +103,19 @@ lumen push --config lumen.config.ts</code></pre>
         <p><strong>Device clocks drift.</strong> Lumen rejects points more than 24 hours in the past. Send
         <code>X-Lumen-Offset-Ms</code> to correct for a known device offset.</p>
       </main>
+
+      <!-- ══════════════ the chat widget, in the site's own layout ══════════════ -->
+      <aside class="chat-dock">
+        <div id="chat"></div>
+        <p class="chat-foot">
+          Serving locally · no server · nothing leaves this tab<br />
+          <a href="https://github.com/warsang/wasmTune#readme" target="_blank" rel="noopener">how this works →</a>
+        </p>
+      </aside>
     </div>
 
     <footer class="site-foot">Lumen is a fictional product. This page exists to host a demo widget.</footer>
   </div>
-
-  <!-- ══════════════ the chat widget target ══════════════ -->
-  <aside class="chat-dock">
-    <div id="chat"></div>
-    <p class="chat-foot">
-      Serving locally · no server · nothing leaves this tab<br />
-      <a href="https://github.com/warsang/wasmTune#readme" target="_blank" rel="noopener">how this works →</a>
-    </p>
-  </aside>
 
   <!-- ══════════════ demo instrumentation ══════════════ -->
   <section class="panel" id="panel">
