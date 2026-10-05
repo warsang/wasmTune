@@ -1,7 +1,18 @@
 # CUDA (NVIDIA Linux/Windows) training deps — Unsloth + TRL + PEFT.
-# Pins follow the 2026 SOTA stack: Unsloth kernels, TRL trainers, PEFT LoRA.
---extra-index-url https://download.pytorch.org/whl/cu121
-torch>=2.3
+#
+# torch/torchvision are NOT listed here. They are installed separately by
+# `wasmtune train` from a CUDA wheel index (default cu128, override with
+# WASMTUNE_CUDA_INDEX), because:
+#
+#   * an `--extra-index-url` on a pinned CUDA version silently resolves to the
+#     newest torch on PyPI, which is not built for that CUDA version, and
+#   * the default PyPI torch wheel for **Windows** is CPU-only.
+#
+# The result was a silent CPU-only install: `torch 2.12.1+cpu`, and then
+# unsloth failing with "Unsloth cannot find any torch accelerator? You need a
+# GPU." on a machine that had a GPU. Do not re-add torch here.
+#
+# Everything below is pure-Python or resolves identically on either wheel.
 unsloth>=2024.11
 trl~=0.13
 peft~=0.14
