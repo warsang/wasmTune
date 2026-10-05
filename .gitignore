@@ -1,6 +1,7 @@
 node_modules/
 .finetune/
 .finetune-*/
+.onnx-venv/
 coverage/
 dist-demo/
 tmp-models/
