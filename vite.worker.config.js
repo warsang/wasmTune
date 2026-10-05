@@ -1,4 +1,6 @@
 import { defineConfig } from "vite";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Second half of the demo build: the chat WebWorker.
 //
@@ -9,9 +11,17 @@ import { defineConfig } from "vite";
 // `import("@mlc-ai/web-llm")` to a real chunk, which is what makes the WebGPU
 // path work on a static host with no bundler in the consumer's way.
 
+const here = path.dirname(fileURLToPath(import.meta.url));
+
 export default defineConfig({
   build: {
-    outDir: "../dist-demo",
+    // Absolute, not "../dist-demo". Without an explicit `root` this config's
+    // root is the package directory, so a relative outDir resolved to the
+    // package's PARENT — the worker was written outside the repo and never
+    // reached the Pages artifact. The widget then 404'd on worker.js and the
+    // chat sat on "loading model…" forever, because the worker never started
+    // and so never posted a status.
+    outDir: path.resolve(here, "dist-demo"),
     emptyOutDir: false, // the page build owns the directory
     target: "es2022",
     lib: {

@@ -183,6 +183,61 @@ function renderPicked() {
     ") and the browser caches them; later visits are offline. A real `wasmtune convert` run ships your tuned weights here instead of these public pretrained builds."));
 }
 
+// ── worker watchdog ────────────────────────────────────────────────────
+// <site-chat> renders "loading model…" from its template and only replaces it
+// when the worker posts a message. If the worker script 404s, throws on load,
+// or never starts, the widget sits on that string forever with no error
+// anywhere — which is exactly what a missing worker.js looked like. Watch the
+// status line and the engine label, and say something useful if nothing moves.
+function startWorkerWatchdog() {
+  const el = document.querySelector("#chat site-chat");
+  if (!el?.shadowRoot) return;
+  const $s = (sel) => el.shadowRoot?.querySelector(sel);
+  const status = $s(".status");
+  const engine = $s(".engine");
+  if (!status || !engine) return;
+
+  let last = "";
+  let changedAt = performance.now();
+  const IDLE_MS = 25_000;
+  const tick = setInterval(() => {
+    const now = `${status.textContent}|${engine.textContent}`;
+    if (now !== last) {
+      last = now;
+      changedAt = performance.now();
+      return;
+    }
+    // Ready, failed, or answered: nothing to guard.
+    if (/ready|unavailable|failed|below|error|smaller/i.test(now)) return;
+    if (performance.now() - changedAt < IDLE_MS) return;
+
+    clearInterval(tick);
+    const stillLoading = /loading/i.test(status.textContent ?? "");
+    status.textContent = stillLoading
+      ? "the chat worker never started — worker.js may be missing from this deployment"
+      : status.textContent;
+    status.style.color = "var(--bad)";
+    engine.textContent = "(worker failed)";
+    const row = document.createElement("div");
+    row.className = "row";
+    row.dataset.workerError = "1";
+    const b = document.createElement("b");
+    b.textContent = "The chat worker did not start.";
+    row.append(b);
+    const detail = document.createElement("div");
+    detail.style.cssText = "font-size:12px;opacity:.85;margin:4px 0";
+    detail.textContent =
+      `worker.js should be served next to index.html. Check the network tab for ` +
+      `/worker.js — a 404 there means the build did not emit it. The model tier ` +
+      `picker below still works; it does not need the worker.`;
+    row.append(detail);
+    el.shadowRoot.querySelector(".log")?.prepend(row);
+    console.error("[wasmtune demo] chat worker appears not to have started", {
+      status: status.textContent, engine: engine.textContent,
+    });
+  }, 3000);
+}
+
 // ── mounting ──────────────────────────────────────────────────────────
 async function mount() {
   if (!manifest) return;
@@ -272,4 +327,5 @@ $("big-tiers").onchange = async (e) => {
   renderTiers();
   renderPicked();
   await mount();
+  startWorkerWatchdog();
 })();

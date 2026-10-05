@@ -1,13 +1,19 @@
 import { defineConfig } from "vite";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Static promo/demo site for the npm README. Deployed to GitHub Pages by
 // .github/workflows/pages.yml, so `base` has to match the project path.
+const here = path.dirname(fileURLToPath(import.meta.url));
+
 export default defineConfig({
   root: "demo",
   base: process.env.DEMO_BASE ?? "/wasmTune/",
   publicDir: "public",
   build: {
-    outDir: "../dist-demo",
+    // Absolute for the same reason as vite.worker.config.js: a relative
+    // outDir silently depends on `root`, and the two builds disagreed.
+    outDir: path.resolve(here, "dist-demo"),
     emptyOutDir: true,
     target: "es2022",
     chunkSizeWarningLimit: 8192, // @mlc-ai/web-llm ships a large runtime
