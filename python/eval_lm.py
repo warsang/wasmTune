@@ -38,15 +38,25 @@ def main():
 def apply_template(tokenizer, prompt):
     try:
         if getattr(tokenizer, "chat_template", None):
+            # tokenize=False is load-bearing. apply_chat_template defaults to
+            # tokenize=True and therefore returns input_ids, not text; feeding
+            # those straight back into tok() raises "text input must be of type
+            # str (single example), list[str] ...". That broke `wasmtune eval`
+            # for every model that ships a chat template (i.e. every instruct
+            # model), and eval is the regression gate `wasmtune build` depends
+            # on.
+            #
             # Disable hybrid thinking where supported (Qwen3.5, Gemma4):
             # eval measures answers, not reasoning traces.
             try:
                 return tokenizer.apply_chat_template(
                     [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True, enable_thinking=False)
-            except Exception:
+                    add_generation_prompt=True, tokenize=False, enable_thinking=False)
+            except TypeError:
+                # Older/newer templates may not accept enable_thinking.
                 return tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}], add_generation_prompt=True)
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True, tokenize=False)
     except Exception:
         pass
     return prompt

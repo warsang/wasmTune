@@ -4,7 +4,7 @@
 // Zero runtime deps; Python/torch live behind the auto-venv in train/.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -15,7 +15,21 @@ const { loadConfig, defaultConfig, validateConfig, resolveConfig, configModels }
 const { formatModels, assertAllowedModel, lookupModel, slugifyModel } = await import("../src/models.mjs");
 const { buildDataset } = await import("../src/dataset/index.mjs");
 const { resolveBackend, detectPlatform, trainerFor } = await import("../src/train/router.mjs");
-const { ensureVenv, runTrainer, venvPaths } = await import("../src/train/venv.mjs");
+const { ensureVenv, runTrainer, runPython, venvPaths } = await import("../src/train/venv.mjs");
+
+// A HF dir counts as usable only once it actually contains weights. The
+// in-trainer merge writes config.json first and can then fail on save, leaving
+// a directory that looks populated but has nothing to quantize.
+function hasWeights(dir) {
+  if (!existsSync(dir)) return false;
+  try {
+    return readdirSync(dir).some(
+      (f) => /\.(safetensors|bin|pt|gguf)$/i.test(f) || f.endsWith(".safetensors.index.json"),
+    );
+  } catch {
+    return false;
+  }
+}
 const { convertModel, pretrainedEntry, writeModelsManifest } = await import("../src/convert/to_mlc.mjs");
 const { serve } = await import("../src/serve.mjs");
 const { runEval, formatEvalTable } = await import("../src/eval/index.mjs");
@@ -276,10 +290,35 @@ async function cmdConvert(opts, cwd) {
     const slug = slugifyModel(entry.model);
     if (entry.trained) {
       const { relOut } = entryConfig(config, entry, multi);
-      const mergedDir = path.join(path.resolve(cwd, relOut), "run", "merged");
-      if (!existsSync(mergedDir)) {
-        notes.push(`${slug}: no merged weights at ${mergedDir} — run "wasmtune train" first (skipped)`);
-        continue;
+      const runDir = path.join(path.resolve(cwd, relOut), "run");
+      const mergedDir = path.join(runDir, "merged");
+      const adaptersDir = path.join(runDir, "adapters");
+      if (!hasWeights(mergedDir)) {
+        // The in-trainer merge is best-effort: merging LoRA into a 4-bit
+        // bnb model and calling save_pretrained() breaks on transformers 5.x,
+        // which leaves merged/ holding only config.json. export.py loads the
+        // base at full precision instead and produces the same result, so
+        // produce the weights here rather than skipping the tier.
+        if (!existsSync(adaptersDir)) {
+          notes.push(`${slug}: no adapters at ${adaptersDir} and no merged weights — run "wasmtune train" first (skipped)`);
+          continue;
+        }
+        console.error(`[wasmtune] merging adapters -> HF dir (${entry.model}) ...`);
+        try {
+          await ensureVenv({ outDir: path.resolve(cwd, relOut), backend: "unsloth", cwd, python: opts.python ?? "python3" });
+          await runPython({
+            outDir: path.resolve(cwd, relOut), script: "python/export.py",
+            args: ["--adapters", adaptersDir, "--base", entry.model, "--out", mergedDir],
+            cwd,
+          });
+        } catch (err) {
+          notes.push(`${slug}: merge failed (${err.message}) — skipped`);
+          continue;
+        }
+        if (!hasWeights(mergedDir)) {
+          notes.push(`${slug}: merge produced no weights in ${mergedDir} — skipped`);
+          continue;
+        }
       }
       console.error(`[wasmtune] converting tuned tier ${entry.model}`);
       const { entry: built, notes: n } = await convertModel({

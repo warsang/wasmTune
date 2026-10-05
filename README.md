@@ -137,6 +137,33 @@ scores keyword recall with repetition-loop detection and rambling penalties:
 Exit code is non-zero on regression (disable with `eval.failOnRegression=false`).
 Flags: `--max-prompts N`, `--max-tokens N`, `--skip-tuned`, `--backend ...`.
 
+`untraced` in `eval.report.json` lists the tokens a completion used that no
+reference answer used. A tuned model that is still confabulating will score well
+on `avg` and badly here — check both.
+
+A real end-to-end run on this repo's `examples/lumen-docs/` — 6 pages, 51 SFT
+pairs, Qwen2.5-0.5B-Instruct, 3 epochs on one RTX 2070 (~4.5 min):
+
+```
+  base     avg=0.113  n=39 looped=0 faith=0.199 conv=0.6
+  tuned    avg=0.152  n=39 looped=0 faith=0.238 conv=0.6
+  delta=+0.039  memDelta=+0.049  regression=false
+```
+
+**Read that carefully before trusting it.** The gate passed and the delta is
+real, but `faith` stayed at 0.238 — keyword recall goes up while the model is
+still inventing most of what it says. Look at what a 51-pair tune on a 0.5B
+model actually produces for *"What is the maximum batch size?"*: it says *"The
+maximum batch size for TPU is 1024"*. The scored keywords (`records`, `request`)
+are present, so it scores 0.38, and the surrounding sentence is confabulated.
+
+So the metric rewards parroting reference keywords and does not penalise
+confident filler. Treat a passing gate as *"training moved the model"*, not
+*"the model is correct"*. `faith` and the per-prompt `untraced` list in
+`eval.report.json` are the honesty check — read those, not just `avg`. On a
+0.5B model you need a real corpus, not a smoke test, before shipping answers
+to anyone.
+
 ## Model tiers & hardware detection
 
 Fine-tuning and serving are different hardware problems: the machine that

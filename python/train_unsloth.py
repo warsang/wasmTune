@@ -8,6 +8,7 @@ args file passed as --args-json.
 import argparse
 import json
 import os
+import shutil
 import sys
 
 
@@ -69,15 +70,27 @@ def main():
         dtype=None,
         load_in_4bit=bool(cfg.get("quant4", True)),
     )
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=int(lora.get("r", 16)),
-        target_modules=None,  # auto per architecture
-        lora_alpha=int(lora.get("alpha", 16)),
-        lora_dropout=float(lora.get("dropout", 0.05)),
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-    )
+    # target_modules=None is NOT the same as omitting the argument. Unsloth
+    # picks the module list itself when the kwarg is absent, but from
+    # 2025.x onward get_peft_model() iterates whatever it is handed, so
+    # passing None raises "TypeError: 'NoneType' object is not iterable"
+    # inside unsloth/models/llama.py.
+    peft_kwargs = {
+        "r": int(lora.get("r", 16)),
+        "lora_alpha": int(lora.get("alpha", 16)),
+        "lora_dropout": float(lora.get("dropout", 0.05)),
+        "bias": "none",
+        "use_gradient_checkpointing": "unsloth",
+    }
+    # lora.targetModules is "auto" in the shipped config, meaning "let unsloth
+    # choose for this architecture". A string is not a module list: iterating
+    # it yields characters and peft then fails with
+    # "Target modules {'a','o','t','u'} not found in the base model". Only pass
+    # an explicit list when the config actually supplies one.
+    targets = lora.get("targetModules")
+    if isinstance(targets, (list, tuple)) and targets:
+        peft_kwargs["target_modules"] = [str(m) for m in targets]
+    model = FastLanguageModel.get_peft_model(model, **peft_kwargs)
 
     ds_path = {"sft": cfg["sftFile"], "dpo": cfg["dpoFile"], "orpo": cfg["dpoFile"], "grpo": cfg["grpoFile"]}[method]
     with open(ds_path) as f:
@@ -150,13 +163,36 @@ def main():
     trainer.train()
     model.save_pretrained(os.path.join(out, "adapters"))
     tokenizer.save_pretrained(os.path.join(out, "adapters"))
-    # Merge for convert step (16-bit; quantization happens in convert).
+    # Merge for the convert step (quantization happens in convert).
+    #
+    # Best-effort only: merge_and_unload() merges LoRA into a 4-bit bnb model,
+    # and save_pretrained() on that merged model raises NotImplementedError on
+    # transformers 5.x (it tries to reverse a weight conversion that has no
+    # reverse op). That writes config.json and then dies, leaving merged/ with
+    # no weights. `wasmtune convert` detects the empty dir and re-runs
+    # python/export.py, which loads the base at full precision and succeeds.
+    merged_dir = os.path.join(out, "merged")
     try:
         merged = model.merge_and_unload()
-        merged.save_pretrained(os.path.join(out, "merged"))
-        tokenizer.save_pretrained(os.path.join(out, "merged"))
     except Exception as e:
-        print(f"WARNING: merge_and_unload failed ({e}); adapters still saved.", file=sys.stderr)
+        print(
+            f"WARNING: merge_and_unload failed ({type(e).__name__}: {e}); "
+            "adapters saved, `wasmtune convert` will merge via export.py.",
+            file=sys.stderr,
+        )
+    else:
+        try:
+            merged.save_pretrained(merged_dir)
+            tokenizer.save_pretrained(merged_dir)
+        except Exception as e:
+            # Remove the half-written dir: config.json without weights is worse
+            # than no directory, because it looks like a successful merge.
+            print(
+                f"WARNING: merged.save_pretrained failed ({type(e).__name__}: {e}); "
+                "adapters saved, `wasmtune convert` will merge via export.py.",
+                file=sys.stderr,
+            )
+            shutil.rmtree(merged_dir, ignore_errors=True)
     with open(os.path.join(out, "train.report.json"), "w") as f:
         json.dump({"method": method, "model": model_id, "backend": "unsloth"}, f, indent=2)
     print(f"done -> {out}")
