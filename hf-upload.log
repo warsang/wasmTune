@@ -1,0 +1,42 @@
+shards: 16 total, 8 to upload
+  ok      8.0 MB   70.5s  onnx/q8.bin08
+  ok      8.3 MB   92.4s  onnx/q8.bin09
+  ok      7.6 MB   63.4s  onnx/q8.bin10
+  ok      8.0 MB   51.2s  onnx/q8.bin11
+  ok      8.0 MB   60.5s  onnx/q8.bin12
+  ok      8.3 MB   70.0s  onnx/q8.bin13
+  ok      7.6 MB   45.5s  onnx/q8.bin14
+  ok      2.7 MB   15.8s  onnx/q8.bin15
+  ok     4.5 MB   22.8s  onnx/model_q8.onnx
+  removed uptest/probe25.bin
+  removed uptest/probe5.bin
+  removed uptest/probe80.bin
+
+repo complete - all shards present
+final repo contents:
+  .gitattributes
+  chat_template.jinja
+  config.json
+  generation_config.json
+  merges.txt
+  onnx/model_q8.onnx
+  onnx/q8.bin00
+  onnx/q8.bin01
+  onnx/q8.bin02
+  onnx/q8.bin03
+  onnx/q8.bin04
+  onnx/q8.bin05
+  onnx/q8.bin06
+  onnx/q8.bin07
+  onnx/q8.bin08
+  onnx/q8.bin09
+  onnx/q8.bin10
+  onnx/q8.bin11
+  onnx/q8.bin12
+  onnx/q8.bin13
+  onnx/q8.bin14
+  onnx/q8.bin15
+  special_tokens_map.json
+  tokenizer.json
+  tokenizer_config.json
+  vocab.json

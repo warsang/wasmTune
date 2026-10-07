@@ -45,6 +45,7 @@ Commands:
   train [--config <path>] [--allow-large] [--backend auto|unsloth|mlx] [--max-steps N] [--dry-run] [--python <bin>]
   eval [--config <path>] [--backend auto|unsloth|mlx] [--max-prompts N] [--max-tokens N] [--skip-tuned] [--judge provider:model] [--python <bin>]
   convert [--config <path>]
+  publish [--config <path>] --repo <user>/<name> [--token <hf-token>] [--private]
   serve [--config <path>] [--port N]
   build [--config <path>] [train/eval/dataset flags...] — dataset→train→eval→convert; eval gate fails the build
 
@@ -55,7 +56,14 @@ With a file present those same flags override it. Precedence: flags > file > def
 Multi-model tiers: add "models": [{ model, trained?, gguf?, label?, chat?, requirements? }]
 to the config. train/eval run per trained entry (.finetune/<slug>/); convert writes
 one manifest with every tier, and the browser serves the best tier its hardware can run.
-Docs: https://github.com/warsang/wasmTune`;
+Docs: https://github.com/warsang/wasmTune
+
+Publishing: weights are 100 MB - 1 GB, which no static host will take, so
+"wasmtune publish" uploads the converted ONNX graph + tokenizer to the Hub and
+prints the manifest line that points at it. It needs HF_TOKEN (or --token) and
+is the only command that touches the network or a credential — dataset, train,
+eval and convert all stay offline and work without an account. It is
+intentionally not part of "build", so a build hook stays reproducible.`;
 
 function parse(argv) {
   const out = { cmd: argv[2] ?? null, opts: {} };
@@ -358,6 +366,9 @@ async function cmdConvert(opts, cwd) {
 async function cmdBuild(opts, cwd) {
   // One-shot pipeline for prebuild hooks: dataset -> train -> eval -> convert.
   // The eval gate throws on regression, failing the build so no bad model ships.
+  // Publishing is deliberately NOT part of this: it needs a credential and a
+  // remote, and a build hook must stay reproducible offline. Run
+  // `wasmtune publish` as a separate release step.
   console.error("[wasmtune] build: dataset");
   await cmdDataset(opts, cwd);
   console.error("[wasmtune] build: train");
@@ -367,6 +378,111 @@ async function cmdBuild(opts, cwd) {
   console.error("[wasmtune] build: convert");
   await cmdConvert(opts, cwd);
   console.error("[wasmtune] build: done — model manifest ready for deploy");
+}
+
+/**
+ * Upload converted browser artifacts to the Hugging Face Hub.
+ *
+ * Optional by design: without a token this skips loudly and the rest of the
+ * pipeline is unaffected. Weights for a usable chat model run 100 MB - 1 GB,
+ * which no static host will take, so the Hub is the practical home for them —
+ * but requiring an account to fine-tune locally would be a worse trade, so the
+ * dependency lives in this one command.
+ */
+async function cmdPublish(opts, cwd) {
+  const { publish, graphsIn, tokenFor, ensureRepo, uploadFile, writeModelCard } = await import("../src/publish.mjs");
+
+  // Check the credential before anything else: a user with no token should get
+  // the skip message, not a config-resolution error.
+  const token = tokenFor(opts.token ?? null);
+  if (!token) {
+    console.error(
+      "[wasmtune] publish skipped: no Hugging Face token.\n" +
+      "  Set HF_TOKEN (or pass --token), then re-run `wasmtune publish`.\n" +
+      "  Everything else — dataset, train, eval, convert — works offline without one.",
+    );
+    return;
+  }
+
+  const { config } = await resolveConfig(opts, cwd);
+
+  const repoId = opts.repo ?? publish?.repo ?? null;
+  if (!repoId) {
+    throw new Error(
+      "publish needs a repo id: pass --repo <user>/<name> or set publish.repo in the config",
+    );
+  }
+
+  const entries = configModels(config);
+  const webDir = path.resolve(cwd, config.output.webDir);
+  const multi = entries.length > 1;
+  let uploaded = 0;
+  const skipped = [];
+
+  console.error(`[wasmtune] publishing to ${repoId}`);
+  await ensureRepo({ repoId, token, privateRepo: !!opts.private });
+
+  for (const entry of entries) {
+    const slug = slugifyModel(entry.model);
+    if (!entry.trained) {
+      skipped.push(`${slug}: served from a public pretrained build, nothing to upload`);
+      continue;
+    }
+    const { relOut } = entryConfig(config, entry, multi);
+    const onnxDir = path.join(path.resolve(cwd, relOut), "onnx");
+    const graphs = await graphsIn(onnxDir);
+    if (!graphs.length) {
+      skipped.push(`${slug}: no onnx/ graphs at ${onnxDir} — run \`wasmtune convert\` with optimum-cli installed`);
+      continue;
+    }
+    // Smallest first: it is the one transformers.js will fetch on a phone.
+    const chosen = graphs[0];
+    console.error(`[wasmtune] ${slug}: ${chosen.file} (${(chosen.bytes / 1e6).toFixed(1)} MB, dtype ${chosen.dtype})`);
+
+    const sub = multi ? `${slug}/` : "";
+    await uploadFile({ repoId, token, localPath: path.join(onnxDir, chosen.file), pathInRepo: `${sub}onnx/${chosen.file}` });
+    uploaded++;
+
+    // The graph is useless without its external data and the tokenizer.
+    const { externalDataRefs } = await import("../src/publish.mjs");
+    for (const ref of externalDataRefs(path.join(onnxDir, chosen.file))) {
+      const local = path.join(onnxDir, ref);
+      if (!existsSync(local)) {
+        console.error(`[wasmtune] WARNING: graph references ${ref} but it is not in ${onnxDir}`);
+        continue;
+      }
+      await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}onnx/${ref}` });
+      uploaded++;
+    }
+    for (const f of ["config.json", "generation_config.json", "tokenizer.json",
+                     "tokenizer_config.json", "special_tokens_map.json",
+                     "chat_template.jinja", "vocab.json", "merges.txt"]) {
+      const local = path.join(path.resolve(cwd, relOut), "merged", f);
+      if (existsSync(local)) {
+        await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}${f}` });
+        uploaded++;
+      }
+    }
+  }
+
+  if (!uploaded) {
+    console.error("[wasmtune] publish: nothing to upload");
+    for (const s of skipped) console.error(`  note: ${s}`);
+    return;
+  }
+
+  const card = await writeModelCard({
+    dir: cwd, siteName: config.dataset.siteName ?? path.basename(config.dataDir),
+    baseModel: config.model, dtype: (await graphsIn(path.join(path.resolve(cwd, entryConfig(config, entries[0], multi).relOut), "onnx")))[0]?.dtype ?? "q8",
+  }).catch(() => null);
+  if (card) {
+    await uploadFile({ repoId, token, localPath: card, pathInRepo: "README.md" });
+    uploaded++;
+  }
+
+  console.error(`[wasmtune] published ${uploaded} file(s) -> https://huggingface.co/${repoId}`);
+  console.error(`[wasmtune] point a manifest tier at it with: { "onnx": "${repoId}" }`);
+  for (const s of skipped) console.error(`note: ${s}`);
 }
 
 async function cmdServe(opts, cwd) {
@@ -395,6 +511,7 @@ async function main() {
   if (cmd === "train") return cmdTrain(opts, cwd);
   if (cmd === "eval") return cmdEval(opts, cwd);
   if (cmd === "convert") return cmdConvert(opts, cwd);
+  if (cmd === "publish") return cmdPublish(opts, cwd);
   if (cmd === "build") return cmdBuild(opts, cwd);
   if (cmd === "serve") return cmdServe(opts, cwd);
   console.error(`unknown command "${cmd}"\n${USAGE}`);

@@ -11,4 +11,7 @@ tmp-models/
 __pycache__/
 *.pyc
 unsloth_compiled_cache/
-wt-convert.config.json
+wt-convert.config.jsonhf-upload.log
+hf-single.log
+hf-diag.log
+hf-lfs.log
