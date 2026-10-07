@@ -187,8 +187,16 @@ function renderPicked() {
 // <site-chat> renders "loading model…" from its template and only replaces it
 // when the worker posts a message. If the worker script 404s, throws on load,
 // or never starts, the widget sits on that string forever with no error
-// anywhere — which is exactly what a missing worker.js looked like. Watch the
-// status line and the engine label, and say something useful if nothing moves.
+// anywhere — which is exactly what a missing worker.js, and then a wrong
+// worker URL, both looked like.
+//
+// The test is deliberately narrow: has the status moved off the template
+// string at all? Comparing successive texts looks equivalent but is not —
+// web-llm emits repeated identical progress lines, so a "did the text change"
+// watchdog fires on a perfectly healthy 200 MB download that reported the same
+// percentage twice. Anything the worker posted at all means the worker ran.
+const TEMPLATE_STATUS = "loading model…";
+
 function startWorkerWatchdog() {
   const el = document.querySelector("#chat site-chat");
   if (!el?.shadowRoot) return;
@@ -197,25 +205,18 @@ function startWorkerWatchdog() {
   const engine = $s(".engine");
   if (!status || !engine) return;
 
-  let last = "";
-  let changedAt = performance.now();
-  const IDLE_MS = 25_000;
+  const startedAt = performance.now();
+  const GRACE_MS = 30_000;
   const tick = setInterval(() => {
-    const now = `${status.textContent}|${engine.textContent}`;
-    if (now !== last) {
-      last = now;
-      changedAt = performance.now();
+    // The worker posted something: it is alive. Stand down.
+    if (status.textContent.trim() !== TEMPLATE_STATUS) {
+      clearInterval(tick);
       return;
     }
-    // Ready, failed, or answered: nothing to guard.
-    if (/ready|unavailable|failed|below|error|smaller/i.test(now)) return;
-    if (performance.now() - changedAt < IDLE_MS) return;
+    if (performance.now() - startedAt < GRACE_MS) return;
 
     clearInterval(tick);
-    const stillLoading = /loading/i.test(status.textContent ?? "");
-    status.textContent = stillLoading
-      ? "the chat worker never started — worker.js may be missing from this deployment"
-      : status.textContent;
+    status.textContent = "the chat worker never started — check that worker.js is served";
     status.style.color = "var(--bad)";
     engine.textContent = "(worker failed)";
     const row = document.createElement("div");
@@ -227,15 +228,17 @@ function startWorkerWatchdog() {
     const detail = document.createElement("div");
     detail.style.cssText = "font-size:12px;opacity:.85;margin:4px 0";
     detail.textContent =
-      `worker.js should be served next to index.html. Check the network tab for ` +
-      `/worker.js — a 404 there means the build did not emit it. The model tier ` +
-      `picker below still works; it does not need the worker.`;
+      `Nothing was posted back within ${GRACE_MS / 1000}s. Check the network tab for worker.js — ` +
+      `a 404 there means the build did not emit it, or that workerUrl points where ` +
+      `the file is not. The model-tier picker below is independent and still works.`;
     row.append(detail);
     el.shadowRoot.querySelector(".log")?.prepend(row);
-    console.error("[wasmtune demo] chat worker appears not to have started", {
-      status: status.textContent, engine: engine.textContent,
+    console.error("[wasmtune demo] chat worker never posted a status", {
+      status: status.textContent,
+      engine: engine.textContent,
+      workerUrl: el._workerUrl ?? "(unset)",
     });
-  }, 3000);
+  }, 2500);
 }
 
 // ── mounting ──────────────────────────────────────────────────────────
