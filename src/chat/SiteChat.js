@@ -116,6 +116,16 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       if (this.getAttribute("base-model")) this._baseModel = this.getAttribute("base-model");
       if (this.siteName) this._siteName = this.siteName;
       if (this.getAttribute("site-name")) this._siteName = this.getAttribute("site-name");
+      // worker-url and cloud-url are re-read here for the same reason as every
+      // field above: mountAssistant() and the framework adapters createElement()
+      // first and set attributes after, so the constructor saw nothing and the
+      // worker silently fell back to `new URL("./worker.js", import.meta.url)`.
+      // In a bundled app that resolves next to the *page* bundle, not the site
+      // root, so a host that correctly passes workerUrl still 404'd its worker.
+      if (this.workerUrl) this._workerUrl = this.workerUrl;
+      if (this.getAttribute("worker-url")) this._workerUrl = this.getAttribute("worker-url");
+      if (this.cloudUrl) this._cloudUrl = this.cloudUrl;
+      if (this.getAttribute("cloud-url")) this._cloudUrl = this.getAttribute("cloud-url");
       if (this.getAttribute("allow-force") != null) this._allowForce = true;
       if (this.entryId) this._entryId = this.entryId;
       if (this.entryRequirements) this._entryRequirements = this.entryRequirements;

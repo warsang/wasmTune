@@ -7,6 +7,7 @@ import {
   planFromManifest,
   resolveManifestUrl,
 } from "../src/chat/mount.mjs";
+import { defineSiteChat } from "../src/chat/SiteChat.js";
 
 const HW_DESKTOP = { webgpu: true, deviceMemoryGB: 8, cores: 8, mobile: false };
 const HW_MOBILE = { webgpu: true, deviceMemoryGB: 4, cores: 8, mobile: true };
@@ -197,6 +198,44 @@ describe("mountAssistant", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+
+  it("keeps workerUrl set after mount (attr set after createElement)", async () => {
+    // mountAssistant createElement()s the element and only then sets attributes,
+    // so the constructor sees none of them. connectedCallback has to re-read
+    // worker-url — otherwise a host that correctly passes workerUrl still gets
+    // the `new URL("./worker.js", import.meta.url)` fallback, which in a bundled
+    // app resolves next to the page bundle rather than the site root, and 404s.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: true, json: async () => MANIFEST });
+    try {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const { element } = await mountAssistant({
+        target: host,
+        manifestUrl: "/models/model-manifest.json",
+        workerUrl: "/chat/worker.js",
+        hardware: HW_DESKTOP,
+      });
+      assert.equal(element.getAttribute("worker-url"), "/chat/worker.js");
+      assert.equal(
+        element._workerUrl,
+        "/chat/worker.js",
+        "connectedCallback must re-read worker-url, not only the constructor",
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("keeps cloudUrl from an attribute after connect", async () => {
+    // cloud-url is not a mountAssistant option (it is a defineSiteChat /
+    // attribute-level setting), so exercise the attribute path directly.
+    const el = document.createElement("site-chat");
+    el.setAttribute("cloud-url", "https://api.test/chat");
+    defineSiteChat({});
+    document.body.append(el);
+    assert.equal(el._cloudUrl, "https://api.test/chat");
   });
 
   it("mounts the tiered pick and passes smaller tiers on the element", async () => {
