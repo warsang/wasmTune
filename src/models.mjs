@@ -17,9 +17,14 @@
 const RAW = [
   {
     hf: "HuggingFaceTB/SmolLM2-135M-Instruct",
-    webllm: "SmolLM2-135M-Instruct-q4f16_1-MLC",
+    // NOT ...-q4f16_1-MLC: web-llm's prebuilt registry never shipped a q4f16
+    // build of the 135M, so that id fails at engine init with "Cannot find
+    // model record in appConfig". Only these two exist, and both are
+    // unquantized — which is why this entry's footprint is fp16-sized, not
+    // the ~78MB a q4 build would need. The ONNX path below is unaffected.
+    webllm: "SmolLM2-135M-Instruct-q0f16-MLC",
     onnx: "onnx-community/SmolLM2-135M-Instruct-ONNX",
-    params: "135M", vram: "~78MB", vramBytes: 8.2e7, context: "2K",
+    params: "135M", vram: "~270MB", vramBytes: 2.7e8, context: "2K",
     family: "SmolLM2", mobileOk: true, cpuOk: true,
   },
   {
@@ -119,7 +124,9 @@ const RAW = [
   },
   {
     hf: "google/gemma-3-1b-it",
-    webllm: "gemma-3-1b-it-q4f16_1-MLC",
+    // gemma3-*, not gemma-3-*: web-llm names this family without the hyphen,
+    // so the older spelling failed at engine init.
+    webllm: "gemma3-1b-it-q4f16_1-MLC",
     onnx: "onnx-community/gemma-3-1b-it-ONNX",
     params: "1B", vram: "~700MB", vramBytes: 7.5e8, context: "8K",
     family: "Gemma", license: "gemma terms", mobileOk: true, cpuOk: false,

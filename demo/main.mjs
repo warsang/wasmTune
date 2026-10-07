@@ -36,7 +36,7 @@ const PROFILES = {
   big:     { webgpu: true, adapter: { vendor: "nvidia", architecture: "ada", device: "RTX 4090", maxBufferSize: 2 ** 33, maxStorageBufferBindingSize: 2 ** 33 }, deviceMemoryGB: 8, cores: 32, mobile: false, crossOriginIsolated: true },
 };
 
-const DEFAULT_TIER = "smollm2-135m"; // smallest: opens in ~80 MB instead of ~1 GB
+const DEFAULT_TIER = "smollm2-360m"; // smallest shipped tier: opens in ~210 MB, not ~1 GB
 
 let manifest = null;
 let realHw = null;

@@ -3,14 +3,6 @@
   "note": "Demo manifest. Every tier here is a public pretrained MLC build served as-is (trained: false) so the demo works for any visitor with no hosted weights. A real `wasmtune convert` run replaces these with LoRA-tuned artifacts (mlc.config + mlc.lib, or gguf).",
   "models": [
     {
-      "id": "smollm2-135m",
-      "label": "SmolLM2 135M Instruct",
-      "base": "HuggingFaceTB/SmolLM2-135M-Instruct",
-      "source": "pretrained",
-      "artifacts": { "webllm": "SmolLM2-135M-Instruct-q4f16_1-MLC" },
-      "chat": { "maxTokens": 192, "temperature": 0.3 }
-    },
-    {
       "id": "smollm2-360m",
       "label": "SmolLM2 360M Instruct",
       "base": "HuggingFaceTB/SmolLM2-360M-Instruct",
