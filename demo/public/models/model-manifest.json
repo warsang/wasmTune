@@ -14,7 +14,7 @@
         }
       },
       "requirements": { "minDeviceMemoryGB": 1, "needsWebGPU": false, "cpuOk": true, "mobileOk": true },
-      "chat": { "maxTokens": 96, "temperature": 0, "repetitionPenalty": 1.25 }
+      "chat": { "maxTokens": 96, "temperature": 0.2, "repetitionPenalty": 1.25 }
     },
     {
       "id": "smollm2-360m",
@@ -58,4 +58,3 @@
     }
   ]
 }
-
