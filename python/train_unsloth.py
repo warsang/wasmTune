@@ -17,17 +17,47 @@ def load_args(path):
         return json.load(f)
 
 
-def to_hf_dataset(rows, kind):
+def render_messages(msgs, tokenizer=None, system_prompt=None):
+    """Render a conversation the way inference will render it.
+
+    This has to be the tokenizer's own chat template. The previous version
+    hand-built "<|role|>\\ncontent" turns, which is not the format any of the
+    supported bases use: SmolLM2 and Qwen reply to <|im_start|>user ... <|im_end|>,
+    Gemma to its own. Training on one format and prompting with another teaches
+    the model facts behind a delimiter it never sees, so the fine-tune cannot
+    surface them — the weights learn the answers but the prompt that elicits
+    them never occurs. Eval and the browser both use apply_chat_template, so
+    training was the odd one out.
+
+    system_prompt matters for the same reason. Most bases inject a *default*
+    system message when a conversation has none (SmolLM2's is "You are a helpful
+    AI assistant named SmolLM..."). Training with that default and then serving
+    the site's own prompt means the fine-tune is always primed with text it will
+    never be given, and never primed with the text it will.
+    """
+    if system_prompt and not any(m.get("role") == "system" for m in msgs):
+        msgs = [{"role": "system", "content": system_prompt}, *msgs]
+    if tokenizer is not None and getattr(tokenizer, "chat_template", None):
+        try:
+            return tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=False)
+        except Exception as e:
+            print(f"WARNING: apply_chat_template failed ({e}); "
+                  f"falling back to <|role|> turns", file=sys.stderr)
+    else:
+        print("WARNING: tokenizer has no chat_template; falling back to <|role|> "
+              "turns. Training and inference formats will not match.", file=sys.stderr)
+    return "".join(f"<|{m.get('role','user')}|>\n{m.get('content','')}\n" for m in msgs)
+
+
+def to_hf_dataset(rows, kind, tokenizer=None, system_prompt=None):
     from datasets import Dataset
     if kind == "sft":
         texts = []
         for r in rows:
             msgs = r.get("messages", [])
-            t = ""
-            for m in msgs:
-                role = m.get("role", "user")
-                t += f"<|{role}|>\n{m.get('content','')}\n"
-            texts.append({"text": t})
+            text = render_messages(msgs, tokenizer, system_prompt)
+            texts.append({"text": text})
         return Dataset.from_list(texts)
     if kind == "dpo" or kind == "orpo":
         return Dataset.from_list([
@@ -101,7 +131,7 @@ def main():
         with open(os.path.join(out, "dry_run.json"), "w") as f:
             json.dump({"method": method, "rows": len(rows), "model": model_id}, f, indent=2)
         return
-    dataset = to_hf_dataset(rows, method)
+    dataset = to_hf_dataset(rows, method, tokenizer, cfg.get("systemPrompt"))
 
     if method == "sft":
         from trl import SFTConfig, SFTTrainer

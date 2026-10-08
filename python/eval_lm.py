@@ -23,6 +23,11 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--temperature", type=float, default=0.0)
+    # Same system prompt the widget sends. Without it the base injects its own
+    # default (SmolLM2's "You are a helpful AI assistant named SmolLM..."),
+    # so the gate would score the tuned model under a prompt it was never
+    # trained on and never served with.
+    ap.add_argument("--system-prompt", default=None)
     a = ap.parse_args()
 
     prompts = [json.loads(l) for l in open(a.prompts) if l.strip()]
@@ -35,9 +40,11 @@ def main():
     print(f"eval: {len(rows)} completions -> {a.out}", file=sys.stderr)
 
 
-def apply_template(tokenizer, prompt):
+def apply_template(tokenizer, prompt, system_prompt=None):
     try:
         if getattr(tokenizer, "chat_template", None):
+            msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) \
+                + [{"role": "user", "content": prompt}]
             # tokenize=False is load-bearing. apply_chat_template defaults to
             # tokenize=True and therefore returns input_ids, not text; feeding
             # those straight back into tok() raises "text input must be of type
@@ -50,13 +57,11 @@ def apply_template(tokenizer, prompt):
             # eval measures answers, not reasoning traces.
             try:
                 return tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True, tokenize=False, enable_thinking=False)
+                    msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False)
             except TypeError:
                 # Older/newer templates may not accept enable_thinking.
                 return tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True, tokenize=False)
+                    msgs, add_generation_prompt=True, tokenize=False)
     except Exception:
         pass
     return prompt
@@ -69,7 +74,7 @@ def run_mlx(a, prompts):
     model, tokenizer = load(a.model, **kwargs)
     rows = []
     for p in prompts:
-        out = generate(model, tokenizer, prompt=apply_template(tokenizer, p["prompt"]),
+        out = generate(model, tokenizer, prompt=apply_template(tokenizer, p["prompt"], a.system_prompt),
                        max_tokens=a.max_tokens, verbose=False)
         rows.append({"id": p["id"], "output": out})
         print(f"[{p['id']}] {len(out)} chars", file=sys.stderr, flush=True)
@@ -93,7 +98,7 @@ def run_cuda(a, prompts):
     model.eval()
     rows = []
     for p in prompts:
-        text = apply_template(tok, p["prompt"])
+        text = apply_template(tok, p["prompt"], a.system_prompt)
         inputs = tok(text, return_tensors="pt").to(model.device)
         with torch.no_grad():
             gen = model.generate(**inputs, max_new_tokens=a.max_tokens,

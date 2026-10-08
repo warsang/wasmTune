@@ -109,6 +109,11 @@ export async function runEval(config, { cwd = process.cwd(), backend = "mlx", ma
     const args = ["--backend", backend === "mlx" ? "mlx" : "cuda",
       "--model", modelForBackend, "--prompts", promptsPath, "--out", outPath,
       "--max-tokens", String(maxTokens)];
+    // Score the model under the prompt it will actually be served with; the
+    // base otherwise injects its own default system message.
+    args.push("--system-prompt",
+      (await import("../chat/options.mjs")).defaultSystemPrompt(
+        config.dataset?.siteName ?? path.basename(path.resolve(cwd, config.dataDir))));
     if (adapters) args.push("--adapters", adapters);
     await runPython({ outDir, script: "python/eval_lm.py", args, cwd });
     return JSON.parse(await readFile(outPath, "utf8"));

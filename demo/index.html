@@ -111,6 +111,13 @@ lumen push --config lumen.config.ts</code></pre>
           Serving locally · no server · nothing leaves this tab<br />
           <a href="https://github.com/warsang/wasmTune#readme" target="_blank" rel="noopener">how this works →</a>
         </p>
+        <p class="chat-caveat">
+          <b>These tiers are not production models.</b> The two pretrained tiers have
+          never seen this site, so they will invent plausible-sounding answers about
+          it. The tuned tier was trained on six pages, which is a smoke test, not a
+          corpus. Point <code>dataDir</code> at your real docs and the same pipeline
+          produces something worth shipping.
+        </p>
       </aside>
     </div>
 

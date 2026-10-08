@@ -199,6 +199,12 @@ async function trainOne(config, outDir, opts, cwd) {
     numLayers: config.training.numLayers ?? 16,
     gradCheckpoint: config.training.gradCheckpoint ?? false,
     seed: config.training.seed,
+    // Render training text with the same system prompt the widget will send.
+    // Bases inject their own default system message when a conversation has
+    // none, so training without this primes the model on text it will never be
+    // given and omits the text it will.
+    systemPrompt: (await import("../src/chat/options.mjs"))
+      .defaultSystemPrompt(config.dataset.siteName ?? path.basename(config.dataDir)),
     maxSteps: opts.maxSteps ?? config.training.maxSteps ?? 0,
     dryRun: !!opts["dry-run"],
     beta: config.dpo.beta,

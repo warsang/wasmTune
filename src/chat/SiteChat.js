@@ -13,6 +13,12 @@ const TEMPLATE = `
   input { flex: 1; padding: 10px; border: 0; background: #141414; color: #eee; }
   button { padding: 0 14px; border: 0; background: #2b6cb0; color: white; cursor: pointer; }
   .status { font-size: 11px; color: #888; padding: 6px 10px; background: #111; }
+  /* Pending indicator. An answer can take tens of seconds — the ONNX path is a
+     single non-streaming forward pass, and a first run also downloads weights —
+     so an empty log is indistinguishable from a hang. */
+  .pending .dots::after { content: ""; animation: sc-dots 1.4s steps(4, end) infinite; }
+  @keyframes sc-dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+  .pending .hint { color: #777; font-size: 11px; }
 </style>
 <div class="wrap">
   <div class="head"><span class="title">Site assistant</span><span class="engine">…</span></div>
@@ -144,6 +150,7 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
         if (!text) return;
         input.value = "";
         this.say("u", text);
+        this._showPending();
         this._worker?.postMessage({ type: "chat", messages: this._history(), model: this._model, onnx: this._onnx, cloudUrl: this._cloudUrl, chatOpts: this._chatOpts, siteName: this._siteName });
       });
       this._historyCache = [];
@@ -176,6 +183,26 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       this._log.scrollTop = this._log.scrollHeight;
       this._historyCache.push({ role: who === "u" ? "user" : "assistant", content: text });
     }
+    // "assistant: …" while the model works. Every terminal path clears it, so it
+    // can never outlive the turn it belongs to.
+    _showPending() {
+      this._clearPending();
+      const div = document.createElement("div");
+      div.className = "row pending";
+      div.dataset.pending = "1";
+      div.innerHTML = `<span class="a">assistant:</span> <span class="dots"></span> `;
+      const hint = document.createElement("span");
+      hint.className = "hint";
+      hint.textContent = this._readyFired
+        ? "generating…"
+        : "waiting for the model to load…";
+      div.append(hint);
+      this._log.append(div);
+      this._log.scrollTop = this._log.scrollHeight;
+    }
+    _clearPending() {
+      this.shadowRoot.querySelector('[data-pending="1"]')?.remove();
+    }
     // Load a manifest tier: swap the artifact set and (re)spawn the worker.
     _loadTier(tier, { forceHw = false } = {}) {
       this._dismissHwError();
@@ -207,8 +234,13 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
           else if (m.type === "retract") this._retractStream(m.text, m.fallback);
           else if (m.type === "loadFailed") this._onArtifactFailed(m);
           else if (m.type === "hwMismatch") this._onHwMismatch(m);
-          else if (m.type === "done" && !m.looped) this._historyCache.push({ role: "assistant", content: m.full });
-          else if (m.type === "error") {
+          else if (m.type === "done") {
+            // Terminal: clear the pending indicator first so it cannot outlive
+            // the turn, including on the loop-tripped path.
+            this._clearPending();
+            if (!m.looped) this._historyCache.push({ role: "assistant", content: m.full });
+          } else if (m.type === "error") {
+            this._clearPending();
             this._status.textContent = m.message;
             if (m.fallback) this.say("a", m.fallback);
             this.dispatchEvent(new CustomEvent("site-chat-error", { bubbles: true, detail: { message: m.message } }));
@@ -252,6 +284,7 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       });
     }
     _showHwMismatch(detail) {
+      this._clearPending();
       this._dismissHwError();
       const div = document.createElement("div");
       div.className = "row";
@@ -307,6 +340,7 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       this._hwShown = false;
     }
     _showLoadError({ kind, url, error }) {
+      this._clearPending();
       this._dismissLoadError();
       const div = document.createElement("div");
       div.className = "row";
@@ -355,6 +389,8 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       this.shadowRoot.querySelector('[data-load-error="1"]')?.remove();
     }
     _appendToken(t) {
+      // First token of the turn: the pending indicator has done its job.
+      this._clearPending();
       let last = this._log.lastChild;
       if (!last || !last.dataset || last.dataset.stream !== "1") {
         last = document.createElement("div");
@@ -373,6 +409,7 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       this._log.scrollTop = this._log.scrollHeight;
     }
     _retractStream(cleanText, fallback) {
+      this._clearPending();
       // A loop tripped mid-stream: replace the streaming bubble with the
       // pre-loop text plus a fallback line so users never see the spiral.
       let last = this._log.lastChild;

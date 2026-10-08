@@ -15,3 +15,7 @@ wt-convert.config.jsonhf-upload.log
 hf-single.log
 hf-diag.log
 hf-lfs.log
+hf-05b.log
+hf-*.log
+wt-05b.config.json
+

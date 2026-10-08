@@ -10,6 +10,51 @@ import os
 import sys
 
 
+def render_messages(msgs, tokenizer=None, system_prompt=None):
+    """Render a conversation the way inference will render it.
+
+    Must be the tokenizer's own chat template. Hand-building "<|role|>" turns
+    teaches the model facts behind a delimiter that never appears at inference,
+    so the fine-tune cannot surface them — the browser and eval both use
+    apply_chat_template, so training has to match them, not the other way round.
+
+    system_prompt matters for the same reason: most bases inject a default
+    system message when a conversation has none, so training with that default
+    and then serving the site's own prompt primes the model with text it never
+    sees and omits the text it does.
+    """
+    if system_prompt and not any(m.get("role") == "system" for m in msgs):
+        msgs = [{"role": "system", "content": system_prompt}, *msgs]
+    if tokenizer is not None and getattr(tokenizer, "chat_template", None):
+        try:
+            return tokenizer.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=False)
+        except Exception as e:
+            print(f"WARNING: apply_chat_template failed ({e}); falling back to "
+                  f"<|role|> turns", file=sys.stderr)
+    else:
+        print("WARNING: tokenizer has no chat_template; falling back to <|role|> "
+              "turns. Training and inference formats will not match.",
+              file=sys.stderr)
+    return "".join(f"<|{m.get('role','user')}|>\n{m.get('content','')}\n" for m in msgs)
+
+
+def mlx_tokenizer(model_id):
+    """Best-effort tokenizer for chat-template rendering on the mlx_lm path.
+
+    This backend cannot be exercised without Apple Silicon, so it is written
+    defensively: if the tokenizer cannot be loaded the caller falls back and
+    says so loudly rather than silently training in the wrong format.
+    """
+    try:
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained(model_id)
+    except Exception as e:
+        print(f"WARNING: could not load a tokenizer for {model_id} ({e})",
+              file=sys.stderr)
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--args-json", required=True)
@@ -144,13 +189,10 @@ def run_mlx_lm_lora(cfg, rows, out):
     data_dir = os.path.join(out, "mlx_data")
     os.makedirs(data_dir, exist_ok=True)
     texts = []
+    tok = mlx_tokenizer(model_id)
     for r in rows:
         msgs = r.get("messages", [])
-        parts = []
-        for m in msgs:
-            role = "user" if m.get("role") == "user" else "assistant"
-            parts.append(f"<|{role}|>\n{m.get('content','')}")
-        texts.append({"text": "\n".join(parts)})
+        texts.append({"text": render_messages(msgs, tok, cfg.get("systemPrompt"))})
     n_valid = max(1, len(texts) // 10)
     with open(os.path.join(data_dir, "train.jsonl"), "w") as f:
         for t in texts[:-n_valid] or texts:
