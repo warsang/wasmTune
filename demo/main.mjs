@@ -36,7 +36,10 @@ const PROFILES = {
   big:     { webgpu: true, adapter: { vendor: "nvidia", architecture: "ada", device: "RTX 4090", maxBufferSize: 2 ** 33, maxStorageBufferBindingSize: 2 ** 33 }, deviceMemoryGB: 8, cores: 32, mobile: false, crossOriginIsolated: true },
 };
 
-const DEFAULT_TIER = "smollm2-360m"; // smallest shipped tier: opens in ~210 MB, not ~1 GB
+const DEFAULT_TIER = "smollm2-360m"; // opens on the better-answering tier; the tuned
+// ONNX tier is one click away (or ?tier=lumen-tuned-135m). It is smaller and
+// would win the "smallest tier" default, but a 51-pair fine-tune answers worse
+// than the pretrained 360M, so opening on it would sell the wrong thing.
 
 let manifest = null;
 let realHw = null;
@@ -260,6 +263,10 @@ async function mount() {
     // The chat worker is a separate build (vite.worker.config.js); SiteChat
     // cannot be told where to find it by static analysis, so we pass it in.
     workerUrl: `${BASE}worker.js`,
+    // transformers.js is not bundled: inlining onnxruntime-web's wasm took the
+    // worker chunk to 72 MB. The ONNX tier loads it from a CDN on demand.
+    // Pinned to the version this demo was built and tested against.
+    transformersUrl: "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.0/+esm",
     siteName: "Lumen",
     title: "Lumen assistant",
     hardware: hwOf(),          // real detectHardware(), or the labelled simulation

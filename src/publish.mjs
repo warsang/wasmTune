@@ -101,9 +101,28 @@ export async function uploadFile({ repoId, token, localPath, pathInRepo, endpoin
   }
   return { pathInRepo, bytes };
 }
+/**
+ * transformers.js reads the chat template from tokenizer_config.json's
+ * `chat_template` field and does not look at a sibling chat_template.jinja.
+ * A repo with the template only in the .jinja file loads fine but fails at
+ * generation time with "Cannot use apply_chat_template() because
+ * tokenizer.chat_template is not set", after which an instruct model behaves
+ * like a raw completion model and continues the system prompt instead of
+ * answering. Returns the path to a corrected copy, or null if nothing to do.
+ */
+export async function inlineChatTemplate({ dir, outDir = dir }) {
+  const cfgPath = path.join(dir, "tokenizer_config.json");
+  const jinjaPath = path.join(dir, "chat_template.jinja");
+  if (!existsSync(cfgPath) || !existsSync(jinjaPath)) return null;
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+  if (typeof cfg.chat_template === "string" && cfg.chat_template.trim()) return null;
+  cfg.chat_template = readFileSync(jinjaPath, "utf8");
+  const out = path.join(outDir, "tokenizer_config.json");
+  await writeFile(out, JSON.stringify(cfg, null, 2));
+  return out;
+}
 
-/** README so the published repo explains what it is. */
-export async function writeModelCard({ dir, siteName, baseModel, dtype, evalReport = null }) {
+/** README so the published repo explains what it is. */export async function writeModelCard({ dir, siteName, baseModel, dtype, evalReport = null }) {
   const lines = [
     "---",
     "library_name: transformers.js",

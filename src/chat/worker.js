@@ -19,6 +19,21 @@ function finalize(text) {
 let engine = null;
 let engineKind = "none";
 let chatOpts = null;
+// transformers.js resolves onnx/model_<dtype>.onnx and the published tier says
+// which dtype it uploaded, so carry it from the manifest through to the load.
+let onnxDtypeResolved = null;
+// Optional URL for transformers.js. Bundling it inlines onnxruntime-web's wasm
+// (the worker chunk hit 72 MB), so a static host passes a CDN or self-hosted
+// URL instead; consumers with a bundler leave it null and the bare specifier is
+// resolved by their build, as before.
+let transformersUrlResolved = null;
+
+// Bare specifier by default (bundler users); an absolute URL when a host
+// supplied one. @vite-ignore keeps the bundler from trying to inline the URL.
+async function loadTransformers() {
+  const spec = transformersUrlResolved ?? "@huggingface/transformers";
+  return import(/* @vite-ignore */ spec);
+}
 
 self.onmessage = async (e) => {
   const msg = e.data || {};
@@ -28,9 +43,11 @@ self.onmessage = async (e) => {
 
 let strictArtifacts = false;
 
-async function init({ model, appConfig, modelId, gguf, onnx = null, wasmUrl, chatOpts: opts, strictArtifacts: strict, entryId = null, requirements = null, forceHw = false }) {
+async function init({ model, appConfig, modelId, gguf, onnx = null, onnxDtype = null, transformersUrl = null, wasmUrl, chatOpts: opts, strictArtifacts: strict, entryId = null, requirements = null, forceHw = false }) {
   chatOpts = resolveChatOptions(opts);
   strictArtifacts = !!strict;
+  onnxDtypeResolved = onnxDtype;
+  transformersUrlResolved = transformersUrl;
   try {
     // Hardware gate: refuse tiers this device can't run. mountAssistant
     // already picks a fitting tier, but standalone <site-chat> usage and
@@ -95,14 +112,22 @@ async function init({ model, appConfig, modelId, gguf, onnx = null, wasmUrl, cha
     // convert`, so browser caches can never serve stale weights.
     // Explicit `gguf` param (manifest artifact or URL); never sniffed
     // from `model` so existing callers are unaffected.
-    const gguf = ggufUrl(gguf);
-    if (gguf) {
+    //
+    // Named ggufTarget, not gguf: `const gguf = ggufUrl(gguf)` shadows the
+    // parameter with a binding declared in the same scope, so the initializer
+    // reads it before initialization and throws
+    //   ReferenceError: Cannot access 'gguf' before initialization
+    // every single time this line ran. It was invisible only because the WebLLM
+    // branch returns early on success — so it broke *every* non-WebLLM path:
+    // GGUF, ONNX, and any browser where WebLLM fails to initialise.
+    const ggufTarget = ggufUrl(gguf);
+    if (ggufTarget) {
       try {
         const { Wllama } = await import("@wllama/wllama");
         const wasm = wasmUrl
           ?? (await import("@wllama/wllama/esm/wasm/wllama.wasm?url")).default;
         const inst = new Wllama({ default: wasm });
-        await inst.loadModelFromUrl(gguf, {
+        await inst.loadModelFromUrl(ggufTarget, {
           n_threads: 4,
           n_gpu_layers: 99,
           progressCallback: ({ loaded, total }) => {
@@ -115,7 +140,7 @@ async function init({ model, appConfig, modelId, gguf, onnx = null, wasmUrl, cha
         post({ type: "status", text: "ready (local, private)" });
         return;
       } catch (err) {
-        post({ type: "loadFailed", kind: "gguf", url: gguf, error: String(err?.message ?? err) });
+        post({ type: "loadFailed", kind: "gguf", url: ggufTarget, error: String(err?.message ?? err) });
         if (strictArtifacts) {
           post({ type: "status", text: "site model failed — see banner above" });
           return;
@@ -125,7 +150,7 @@ async function init({ model, appConfig, modelId, gguf, onnx = null, wasmUrl, cha
     }
     // Transformers.js ONNX fallback
     try {
-      await import("@huggingface/transformers");
+      await loadTransformers();
       engineKind = "transformers";
       post({ type: "engine", name: "Transformers.js" });
       post({ type: "status", text: "ready (ONNX fallback)" });
@@ -137,7 +162,7 @@ async function init({ model, appConfig, modelId, gguf, onnx = null, wasmUrl, cha
     post({ type: "engine", name: "unavailable" });
     post({ type: "status", text: "no local engine (install @mlc-ai/web-llm for WebGPU chat)" });
   } catch (err) {
-    post({ type: "error", message: String(err.message ?? err) });
+    post({ type: "error", message: String(err.message ?? err), stack: String(err.stack ?? "") });
   }
 }
 
@@ -203,15 +228,28 @@ async function chat({ messages, model, onnx = null, cloudUrl, chatOpts: opts, si
       return;
     }
     if (engineKind === "transformers") {
-      const { pipeline } = await import("@huggingface/transformers");
-      const gen = await pipeline("text-generation", onnx ?? model ?? "onnx-community/SmolLM2-135M-Instruct-ONNX");
-      const out = await gen(withSystem.map((m) => m.content).join("\n"), {
+      const { pipeline } = await loadTransformers();
+      const gen = await pipeline("text-generation", onnx ?? model ?? "onnx-community/SmolLM2-135M-Instruct-ONNX",
+        onnxDtypeResolved ? { dtype: onnxDtypeResolved } : {});
+      // Pass the messages through as messages, not as newline-joined text.
+      // transformers.js applies the tokenizer's chat template for a
+      // ChatCompletionInput, which is what an instruct model was trained on.
+      // Joining the raw contents instead makes the model treat the system
+      // prompt as user text and continue it, so it echoed the prompt back
+      // verbatim before answering — and then answered from its own guess.
+      const out = await gen(withSystem, {
         max_new_tokens: chatOpts.maxTokens,
         temperature: chatOpts.temperature,
         top_p: chatOpts.topP,
         repetition_penalty: chatOpts.repetitionPenalty,
       });
-      let text = out?.[0]?.generated_text ?? "";
+      // transformers.js returns the whole conversation for a messages input
+      // (generated_text is a [{role, content}] array), and a plain string for
+      // a prompt input. Take the final assistant turn either way.
+      const g = out?.[0]?.generated_text;
+      const text = Array.isArray(g)
+        ? String(g.filter((m) => m?.role === "assistant").at(-1)?.content ?? "")
+        : String(g ?? "");
       // Non-streaming path: truncate at loop onset if one formed.
       const fin = finalize(text);
       post({ type: "token", text: fin.full });
@@ -237,7 +275,7 @@ async function chat({ messages, model, onnx = null, cloudUrl, chatOpts: opts, si
       fallback: "Chat model is not available in this browser yet. An admin needs to run `wasmtune convert` and serve the model files.",
     });
   } catch (err) {
-    post({ type: "error", message: String(err.message ?? err) });
+    post({ type: "error", message: String(err.message ?? err), stack: String(err.stack ?? "") });
   }
 }
 

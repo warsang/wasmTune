@@ -390,7 +390,7 @@ async function cmdBuild(opts, cwd) {
  * dependency lives in this one command.
  */
 async function cmdPublish(opts, cwd) {
-  const { publish, graphsIn, tokenFor, ensureRepo, uploadFile, writeModelCard } = await import("../src/publish.mjs");
+  const { publish, graphsIn, tokenFor, ensureRepo, uploadFile, writeModelCard, inlineChatTemplate } = await import("../src/publish.mjs");
 
   // Check the credential before anything else: a user with no token should get
   // the skip message, not a config-resolution error.
@@ -462,6 +462,14 @@ async function cmdPublish(opts, cwd) {
         await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}${f}` });
         uploaded++;
       }
+    }
+    // Last, so it wins over the plain tokenizer_config.json above.
+    const mergedDir = path.join(path.resolve(cwd, relOut), "merged");
+    const inlined = await inlineChatTemplate({ dir: mergedDir }).catch(() => null);
+    if (inlined) {
+      await uploadFile({ repoId, token, localPath: inlined, pathInRepo: `${sub}tokenizer_config.json` });
+      uploaded++;
+      console.error(`[wasmtune] ${slug}: inlined chat_template into tokenizer_config.json`);
     }
   }
 

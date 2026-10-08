@@ -44,6 +44,11 @@ export function resolveEntryArtifacts(entry, manifestHref) {
   const rawGguf = typeof a.gguf === "string" ? a.gguf : a.gguf?.url;
   const gguf = rawGguf ? new URL(rawGguf, manifestHref).href : null;
   const onnx = typeof a.onnx === "string" ? a.onnx : (a.onnx?.id ?? a.onnx?.repo ?? null);
+  // transformers.js picks onnx/model_<dtype>.onnx, and the dtype strings do not
+  // map 1:1 to filenames (q8 is served as model_quantized.onnx). A published
+  // ONNX tier therefore has to say which dtype it uploaded, or the loader asks
+  // for a graph that is not there.
+  const onnxDtype = typeof a.onnx === "object" ? (a.onnx?.dtype ?? null) : null;
   const model = a.webllm ?? null;
   let appConfig = null;
   if (a.mlc?.config && a.mlc?.lib) {
@@ -54,7 +59,7 @@ export function resolveEntryArtifacts(entry, manifestHref) {
       }],
     };
   }
-  return { gguf, onnx, model, appConfig, chat: entry?.chat ?? {} };
+  return { gguf, onnx, onnxDtype, model, appConfig, chat: entry?.chat ?? {} };
 }
 
 // Pure manifest -> load plan (unit-testable, no DOM): resolves artifact URLs
@@ -105,7 +110,7 @@ export function planFromManifest(manifest, manifestHref, overrides = {}, { hw = 
 
   const resolved = chosen
     ? resolveEntryArtifacts(chosen, manifestHref)
-    : { gguf: null, onnx: null, model: null, appConfig: null, chat: {} };
+    : { gguf: null, onnx: null, onnxDtype: null, model: null, appConfig: null, chat: {} };
   const fromManifest = chatHints(manifest?.chat ?? {});
   const fromEntry = chatHints(chosen?.chat ?? {});
   const chatOpts = resolveChatOptions({ ...fromManifest, ...fromEntry, ...o });
@@ -118,6 +123,7 @@ export function planFromManifest(manifest, manifestHref, overrides = {}, { hw = 
     gguf: resolved.gguf,
     appConfig: resolved.appConfig,
     onnx: resolved.onnx,
+    onnxDtype: resolved.onnxDtype,
     model,
     chatOpts,
     manifest,
@@ -174,6 +180,7 @@ export async function mountAssistant({
   title = "Site assistant",
   siteName = null,
   workerUrl = null,
+  transformersUrl = null,
   hardware = null,
   allowForce = false,
   preferModel = null,
@@ -217,6 +224,10 @@ export async function mountAssistant({
   if (plan.model) el.setAttribute("model", plan.model);
   if (plan.gguf) el.setAttribute("gguf", plan.gguf);
   if (plan.onnx) el.setAttribute("onnx", plan.onnx);
+  if (plan.onnxDtype) el.setAttribute("onnx-dtype", plan.onnxDtype);
+  // transformersUrl is a caller option, not a manifest field: which CDN or
+  // self-hosted copy to use is a deployment decision, not a property of a tier.
+  if (transformersUrl) el.setAttribute("transformers-url", transformersUrl);
   if (baseModel) el.setAttribute("base-model", baseModel);
   if (workerUrl) el.setAttribute("worker-url", workerUrl);
   if (allowForce) el.setAttribute("allow-force", "");

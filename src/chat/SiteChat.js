@@ -109,6 +109,10 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       else if (this.getAttribute("gguf")) this._gguf = this.getAttribute("gguf");
       if (this.onnx) this._onnx = this.onnx;
       else if (this.getAttribute("onnx")) this._onnx = this.getAttribute("onnx");
+      if (this.onnxDtype) this._onnxDtype = this.onnxDtype;
+      else if (this.getAttribute("onnx-dtype")) this._onnxDtype = this.getAttribute("onnx-dtype");
+      if (this.transformersUrl) this._transformersUrl = this.transformersUrl;
+      else if (this.getAttribute("transformers-url")) this._transformersUrl = this.getAttribute("transformers-url");
       if (this.appConfig !== undefined) this._appConfig = this.appConfig;
       this._appConfig = this._appConfig ?? null;
       if (this.chatOptsPatch) this._chatOpts = { ...this._chatOpts, ...this.chatOptsPatch };
@@ -211,7 +215,9 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
           }
         };
         const init = initOverride ?? {
-          model: this._model, gguf: this._gguf, onnx: this._onnx, appConfig: this._appConfig,
+          model: this._model, gguf: this._gguf, onnx: this._onnx, onnxDtype: this._onnxDtype,
+          transformersUrl: this._transformersUrl,
+          appConfig: this._appConfig,
           chatOpts: this._chatOpts, entryId: this._entryId,
           requirements: this._entryRequirements, forceHw: !!this._forceHw,
         };
@@ -285,7 +291,7 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
           this._loadBlocked = false;
           this._wantsArtifact = false;
           this._forceHw = false;
-          this._worker = this._spawnWorker({ model: this._baseModel, chatOpts: this._chatOpts });
+          this._worker = this._spawnWorker({ model: this._baseModel, chatOpts: this._chatOpts, onnxDtype: this._onnxDtype });
         }));
       }
       div.append(row);
@@ -336,7 +342,7 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
           this._loadBlocked = false;
           this._wantsArtifact = false;
           this._forceHw = false;
-          this._worker = this._spawnWorker({ model: this._baseModel, chatOpts: this._chatOpts });
+          this._worker = this._spawnWorker({ model: this._baseModel, chatOpts: this._chatOpts, onnxDtype: this._onnxDtype });
         }));
       }
       div.append(row);

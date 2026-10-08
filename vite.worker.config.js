@@ -30,9 +30,11 @@ export default defineConfig({
       fileName: () => "worker.js",
     },
     rollupOptions: {
-      // Only the primary engine is bundled. The GGUF and ONNX fallbacks stay
-      // external so they fail at runtime and the widget reports "no local
-      // engine" instead of half-working against a backend we do not serve.
+      // Both fallbacks stay external so the worker stays small: bundling
+      // transformers.js inlines onnxruntime-web's wasm and the worker chunk
+      // ballooned to 72 MB. The demo passes a CDN URL instead (transformersUrl),
+      // which is the same shape as the existing wasmUrl option. A consumer with
+      // its own bundler resolves the bare specifier as before.
       external: ["@wllama/wllama", "@huggingface/transformers"],
       output: {
         chunkFileNames: "worker-[name]-[hash].js",
