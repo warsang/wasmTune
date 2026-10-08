@@ -13,6 +13,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { slugifyModel } from "../models.mjs";
+import { runPython } from "../train/venv.mjs";
 
 const execAsync = promisify(execFile);
 
@@ -174,6 +175,32 @@ export async function convertModel({
     try {
       const out = path.join(outDir, "onnx");
       await execAsync(optimum, ["export", "onnx", "--model", mergedDir, out]);
+      // torch.onnx writes a RoPE table into every decoder layer; merging the
+      // byte-identical copies is a 43% size cut on a 0.5B export and changes no
+      // arithmetic. Optional: a failure here must not lose the export.
+      // The venv lives under the finetune out dir, which is two levels above
+      // mergedDir (run/merged), not under webDir.
+      const finetuneOut = path.resolve(mergedDir, "..", "..");
+      for (const f of ["model_q8.onnx", "model_q4.onnx", "model_fp16.onnx", "model.onnx"]) {
+        const src = path.join(out, f);
+        if (!existsSync(src)) continue;
+        const tmp = path.join(out, `${path.basename(f, ".onnx")}.dedup.onnx`);
+        try {
+          await runPython({
+            outDir: finetuneOut, script: "python/dedupe_onnx.py",
+            // data-name is the final filename, so renaming the graph into place
+            // afterwards keeps its external-data reference valid.
+            args: ["--model", src, "--out", tmp, "--data-name", `${f}_data`],
+            cwd,
+          });
+          if (existsSync(tmp)) {
+            await rename(tmp, src);
+          }
+        } catch (e) {
+          notes.push(`onnx dedupe skipped for ${f}: ${e.message}`);
+          await rm(tmp, { force: true }).catch(() => {});
+        }
+      }
       entry.artifacts.onnx = rel(out);
     } catch (e) {
       notes.push(`onnx skipped: ${e.message}`);
