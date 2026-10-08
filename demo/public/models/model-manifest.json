@@ -3,18 +3,18 @@
   "note": "Demo manifest. Tiers marked source=pretrained are public MLC builds served as-is. The lumen-tuned tier is a LoRA fine-tune of SmolLM2-135M on examples/lumen-docs/, published to the Hub as ONNX q8 by `wasmtune publish`. It is the only tier that runs via transformers.js/ONNX; the rest run on WebLLM.",
   "models": [
     {
-      "id": "lumen-tuned-135m",
-      "label": "Lumen-tuned 135M (ONNX, 51-pair smoke test)",
-      "base": "HuggingFaceTB/SmolLM2-135M-Instruct",
+      "id": "lumen-tuned-0.5b",
+      "label": "Lumen-tuned Qwen2.5 0.5B (ONNX, 51-pair smoke test)",
+      "base": "Qwen/Qwen2.5-0.5B-Instruct",
       "source": "tuned",
       "artifacts": {
         "onnx": {
-          "id": "warsang/lumen-assistant-smollm2-135m",
+          "id": "warsang/lumen-assistant-qwen2.5-0.5b",
           "dtype": "q8"
         }
       },
       "requirements": { "minDeviceMemoryGB": 1, "needsWebGPU": false, "cpuOk": true, "mobileOk": true },
-      "chat": { "maxTokens": 96, "temperature": 0.2, "repetitionPenalty": 1.3 }
+      "chat": { "maxTokens": 96, "temperature": 0.2, "repetitionPenalty": 1.25 }
     },
     {
       "id": "smollm2-360m",
