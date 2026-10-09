@@ -44,6 +44,8 @@ npx wasmtune dataset --dataDir ./docs --model Qwen/Qwen2.5-1.5B-Instruct
 npx wasmtune train   --dataDir ./docs --model Qwen/Qwen2.5-1.5B-Instruct --epochs 3
 npx wasmtune eval    # gate: the tuned model must beat the base, or the build fails
 npx wasmtune convert # merged weights -> GGUF + MLC (q4f16_1) + ONNX + manifest
+npx wasmtune eval-onnx   # scores the artifact that ships, not the fp16 weights
+HF_TOKEN=hf_… npx wasmtune publish   # optional: upload to the Hub + manifest entry
 ```
 
 ```html
@@ -58,6 +60,15 @@ That is the whole integration. `mountAssistant` fetches the manifest, detects
 the visitor's hardware, picks a tier, mounts the widget, and owns the failure
 banners. The first visitor downloads the weights once and the browser caches
 them; every later visit is **fully offline**.
+
+`eval-onnx` runs after `convert` because quantization can cost accuracy that
+`eval` (which scores fp16 weights) cannot see — it scores the quantized graph the
+widget actually loads and fails the run if it dropped more than 10%.
+`publish` is deliberately separate from `convert`: retraining is
+nondeterministic, so a build hook must not churn published weights.
+
+Run `npx wasmtune train --dry-run` to see the resolved config and the reward
+module before it installs anything.
 
 ## Why not just use RAG with a vector DB?
 
@@ -84,17 +95,152 @@ model in the browser beats a retrieval stack, because you delete the stack.
 
 ## The pipeline
 
-1. `npx wasmtune dataset` — crawl `dataDir` into a QA-heavy training set.
-2. `npx wasmtune train` — LoRA/QLoRA locally.
+```bash
+wasmtune dataset    # crawl dataDir -> QA-heavy training set (HTML -> Markdown)
+wasmtune train      # SFT / DPO / ORPO / GRPO, LoRA
+wasmtune eval       # held-out prompts, base vs tuned; non-zero exit on regression
+wasmtune convert    # merged weights -> GGUF + MLC + ONNX, one manifest, quantized
+wasmtune eval-onnx  # scores the artifact that ships — the gate that matters
+HF_TOKEN=… wasmtune publish   # upload to the Hub + write the manifest entry
+```
+
+1. `wasmtune dataset` — crawl `dataDir` into a QA-heavy training set. HTML is
+   converted to structure-preserving Markdown, not tag-stripped (see
+   *Extraction* below).
+2. `wasmtune train` — LoRA/QLoRA locally.
    - NVIDIA Linux/Windows → **Unsloth + TRL + PEFT** (CUDA kernels, fastest).
    - Apple Silicon (M1–M5) → **MLX** via `mlx-lm` / `unsloth-mlx` (unified memory).
-3. `npx wasmtune eval` — held-out prompts, base vs tuned. Non-zero exit on regression.
-4. `npx wasmtune convert` — merged weights → GGUF + MLC (`q4f16_1`) + ONNX, one manifest.
-5. Embed `<site-chat>` — **WebLLM (WebGPU) primary**, Transformers.js and wllama
+3. `wasmtune eval` — held-out prompts, base vs tuned. Non-zero exit on regression.
+4. `wasmtune convert` — merged weights → GGUF + MLC (`q4f16_1`) + ONNX, one
+   manifest. The ONNX is quantized and deduplicated here.
+5. `wasmtune eval-onnx` — scores the quantized graph the widget will load, not
+   the fp16 weights eval scored. Non-zero exit if quantization cost more than
+   `WASMTUNE_QUANT_DROP`. **Run this before publishing.**
+6. `wasmtune publish` — upload to the Hugging Face Hub, verify the sha256 of
+   what landed, and write the manifest entry itself. Optional: needs
+   `HF_TOKEN`, changes nothing else.
+7. Embed `<site-chat>` — **WebLLM (WebGPU) primary**, Transformers.js and wllama
    fallback. Served locally, no server inference.
 
 Real Unsloth is CUDA-only and does not train on Metal — that is why this package
 routes by platform instead of pretending one backend fits all.
+
+## Extraction: HTML becomes Markdown, not a tag-free word stream
+
+`wasmtune dataset` never strips tags with a regex. `<h2>` becomes `##`,
+`<pre><code>` becomes a fenced block, `<table>` becomes a pipe table, and nav /
+footer / aside chrome is dropped rather than trained on.
+
+This is the single highest-leverage step in the dataset stage, and the number is
+not small: **AICC / MinerU-HTML** ([arXiv:2511.16397](https://arxiv.org/abs/2511.16397))
+holds corpus filtering constant and finds extraction quality alone worth
+**+1.08pp across 13 pretraining benchmarks**; **Nemotron-CC-Math**
+([arXiv:2508.15096](https://arxiv.org/abs/2508.15096)) corroborates
+independently. For a small corpus the extraction *is* the quality budget.
+
+The converter is dependency-free (this package ships zero dependencies) and its
+limits are stated rather than implied: images are dropped, nested markup inside
+table cells is flattened. Source is `src/dataset/markdown.mjs`.
+
+## Choosing a method
+
+| method | what it does | use it for |
+|---|---|---|
+| `sft` | next-token prediction on reference answers | **facts**. The validated path. |
+| `dpo` | ranks a good answer above a bad one | removing a specific bad behaviour |
+| `orpo` | DPO without a reference model | shaping when memory is tight |
+| `grpo` | RL against a reward function | optimizing a measurable property |
+
+**The default GRPO reward is a recall count, and that is a coarse proxy.** It
+scores how many of the reference answer's distinctive terms the completion
+carries, and halves the score past 3× the reference length (rambling). It is
+`python/reward.py`, and it uses the same signal `wasmtune eval` measures — so an
+improvement under it shows up in eval rather than being a private metric.
+
+Two things to know before reaching for it:
+
+- **It rewards the right words appearing, not the right value being produced.**
+  `keys`, `stored`, `config`, `credentials` all appear in both
+  `~/.config/lumen/credentials.json` and `~/.config/lumen/API_KEYS.env`, so the
+  default reward scores those two identically. If your domain has many
+  same-token-different-value facts, write your own reward comparing against the
+  reference string, not its keywords.
+- **It cannot recover a fact the corpus does not contain.** A reward function
+  selects among what the model can generate; it does not add knowledge. That is
+  a property of the data, and no method on this list fixes it.
+
+What changed: the default *used* to be `min(len(c) / 500, 1.0)` — it rewarded
+**length**, so the optimal strategy under it was to pad, which is the exact
+opposite of every other part of this package. It also turned out
+`grpo.rewardFile` was dead: the template shipped `./rewards.mjs`, the Python
+trainer loads with `importlib` (which cannot import `.mjs`), and nothing passed
+the path through — so the override never applied and every GRPO run silently
+used the length reward. The path is wired now, and points at a `.py` module.
+
+```python
+# rewards.py — export reward(prompts, completions, reference=None) -> list[float]
+def reward(prompts, completions, reference=None, **kw):
+    refs = reference if isinstance(reference, (list, tuple)) else [reference] * len(completions)
+    return [1.0 if c.strip() == (refs[i] or "").strip() else 0.0
+            for i, c in enumerate(completions)]
+```
+
+```jsonc
+{ "method": "grpo", "grpo": { "rewardFile": "./rewards.py", "numGenerations": 4 } }
+```
+
+The CLI writes the module it actually ran into `<outDir>/default_reward.py` (or
+copies yours to `<outDir>/rewards.py`), so you can open the file the run used
+and edit it rather than guessing what applied. `--dry-run` on `train` shows the
+resolved path before installing anything.
+
+If the reward only needs to rank teaching data you already have, `dpo`/`orpo`
+are simpler and skip the sampling step.
+
+## Limits: why facts don't survive, and what the literature says helps
+
+This is the failure mode people hit first, so it deserves a section rather than
+a footnote. The setup that produces it:
+
+```
+docs 6 · chunks 6 · sftPairs 51 · ~150 gradient steps · 0.5B · LoRA r=16
+base  avg=0.113  n=39 looped=0
+tuned avg=0.152  n=39 looped=0
+delta=+0.039  regression=false
+```
+
+The model learned the vocabulary — "batch", "limits", "keys" all appear in its
+answers now — without anchoring the specific values. Two facts that were
+*literally in the training data* did not survive.
+
+**It is not a capacity problem, and the arithmetic is short.**
+Allen-Zhu & Li's knowledge capacity scaling laws (arXiv:2404.05405) put knowledge
+storage at roughly **2 bits per parameter**. A 0.5B model therefore holds on the
+order of 125 MB of facts. This corpus is ~5 KB. The model has room for roughly
+25,000× more than it was given. What it did not get is *exposure*.
+
+**What the literature points to, in order of how much it actually buys you:**
+
+| lever | evidence | verdict for this package |
+|---|---|---|
+| **Repetition / coverage** | Mallen et al. and the knowledge-capacity line both show recall rises with how often a fact is seen, not with how hard you optimize | ✅ the real fix: more passages per fact, or `--synth` to generate paraphrases |
+| **Full FT instead of LoRA** | *LoRA Learns Less and Forgets Less* (arXiv:2405.09673): in standard low-rank settings LoRA substantially underperforms full FT on the target domain, though it forgets less | ⚠️ buys something, costs the consumer-GPU premise this package is built on |
+| **Rank / mixing known with new** | *How Much Knowledge Can You Pack into a LoRA Adapter without Harming an LLM?* (arXiv:2502.14502): training on a **mixture of known and new facts** beats packing new facts alone | ⚠️ `training.lora.r` is configurable; the mixture is what `--synth` and a bigger `dataDir` give you |
+| **RL with a factual reward** | *MedFact-R1* (arXiv:2509.15154): GRPO with several tailored factual reward signals, up to **+22.5pp absolute** factual accuracy | ⚠️ works, but only to reshape what the model already emits — it cannot recover a fact it never learned (see the caveats above the reward code) |
+| **Knowledge editing (ROME / MEMIT)** | effective on LLM-scale models, brittle and out of scope at 0.5B | ❌ |
+| **Retrieval at inference** | the alternative to storing facts in weights at all | ✅ this is what the *RAG* section above describes |
+
+**The uncomfortable summary:** for a corpus this small, the method is not the
+binding constraint — the corpus is. More epochs on 51 pairs overfit and make it
+worse. The highest-leverage actions are, in order: (1) put more content in
+`dataDir`, especially *more passages covering the same facts*; (2) run
+`--synth ollama:qwen3-4b` to generate paraphrases of those facts;
+(3) read `eval.report.json`'s `untraced` list to see which facts are
+confabulated rather than learned, and target those with more coverage.
+
+That is also why the eval number is quoted honestly here instead of a
+before/after story: on a 6-page corpus, +0.039 over 39 held-out prompts is
+noise-adjacent, and claiming otherwise would be misleading.
 
 ## Data quality doctrine
 
@@ -274,7 +420,8 @@ See `templates/wasmtune.config.example.json` and `examples/lumen-docs/`.
 | `dataset.summary` | One-line site summary for conversational seeds (default: inferred). |
 | `model` | Base model HF id. Must be on the small-model allowlist (`npx wasmtune models`). |
 | `models` | Optional tier list. `{ model, label?, trained?, gguf?, onnx?, webllm?, chat?, requirements? }`. `trained: false` entries are published from their public browser artifacts (no training). `requirements` overrides the lib's known hardware needs (e.g. `{ "minDeviceMemoryGB": 6 }`). |
-| `method` | `sft` \| `dpo` \| `orpo` \| `grpo`. DPO/ORPO need triplets (`dpo.pairsFile` + auto seeds + eval-mined loops); GRPO needs `grpo.rewardFile`. ORPO needs no reference model — prefer it on memory-tight Macs. |
+| `method` | `sft` \| `dpo` \| `orpo` \| `grpo`. DPO/ORPO need triplets (`dpo.pairsFile` + auto seeds + eval-mined loops). ORPO needs no reference model — prefer it on memory-tight Macs. GRPO uses a default reward (recall + brevity) and only needs `grpo.rewardFile` when you want to replace it. See *Choosing a method*. |
+| `grpo.rewardFile` | Optional `.py` module exporting `reward(prompts, completions, reference=None) -> list[float]`. The CLI copies it to `<outDir>/rewards.py`; with none set it writes `python/reward.py` to `<outDir>/default_reward.py`. Only `.py` — it is imported by the Python trainer, which cannot load `.mjs`. |
 | `training.backend` | `auto` (recommended) \| `unsloth` \| `mlx`. `auto` picks MLX on darwin-arm64, Unsloth when CUDA is present. |
 | `chat` | Widget decoding guardrails: `temperature` (default 0.3), `repetitionPenalty` (1.15), `maxTokens` (256), `systemPrompt` (default: brief, honesty-first prompt). Per-entry `models[].chat` wins over it. Passed to `<site-chat>` / worker. |
 
@@ -349,12 +496,16 @@ await mountAssistant({ target: "#chat", workerUrl: "/worker.js" });
 `init` — write a starter `wasmtune.config.json`.
 `check` — validate config + model + platform/CUDA report, plus serving validation: manifest artifact URLs resolve, GGUF architecture is supported by the installed wllama runtime, all split shards present, single-file size warning. `--skip-serve` to skip.
 `models` — print the small-model allowlist.
-`dataset` — crawl `dataDir` → `.finetune/dataset.{sft,dpo,grpo}.jsonl` + report. `--synth provider:model` adds LLM-generated QA pairs.
-`train` — bootstrap `.finetune-venv`, pip install, run SFT/DPO/GRPO. With `models[]`, runs once per trained entry (artifacts under `.finetune/<slug>/`; `trained: false` tiers are skipped).
+`dataset` — crawl `dataDir` → `.finetune/dataset.{sft,dpo,grpo}.jsonl` + report. `.html`/`.htm` sources are converted to structure-preserving Markdown first (see *Extraction*). `--synth provider:model` adds LLM-generated QA pairs.
+`train` — bootstrap `.finetune-venv`, pip install, run SFT/DPO/GRPO. With `models[]`, runs once per trained entry (artifacts under `.finetune/<slug>/`; `trained: false` tiers are skipped). `--dry-run` prints the resolved config and exits before installing anything.
 `eval` — holdout prompts → base vs tuned scores + regression gate (per trained tier).
-`convert` — merged LoRA → GGUF + MLC + ONNX, then writes one manifest with a `models[]` tier list (wraps `mlc_llm`, `llama.cpp`, `optimum`; all optional, loud-skip if missing). Pretrained tiers are published from their public browser ids without conversion.
+`convert` — merged LoRA → GGUF + MLC + ONNX, then writes one manifest with a `models[]` tier list (wraps `mlc_llm`, `llama.cpp`, `optimum`; all optional, loud-skip if missing). Pretrained tiers are published from their public browser ids without conversion. ONNX is quantized here (`model_q4.onnx`) and byte-identical initializers are deduplicated (`python/dedupe_onnx.py`), then recorded as `onnxDtype` in the manifest.
+`eval-onnx` — scores the **quantized** ONNX graph the widget will load, using the same tokenizer and scorer the browser uses. Drops more than `WASMTUNE_QUANT_DROP` (default 0.1) below the fp16 `eval` score ⇒ non-zero exit. Override with `--force` when you accept the loss, `--quant-drop 0.05` to tighten.
 `serve` — static preview server for the chat widget + converted model.
-`build` — one-shot dataset → train → eval → convert. The eval gate throws on regression, so a bad model fails the build instead of shipping.
+`build` — one-shot dataset → train → eval → convert. The eval gate throws on regression, so a bad model fails the build instead of shipping. Retraining is nondeterministic, so `build` never publishes — that stays a separate command.
+`publish` — upload converted artifacts to the Hugging Face Hub, verify the sha256 of what landed matches the file on disk, and write the manifest entry itself. Needs `HF_TOKEN`. Destructive nowhere: re-running re-uploads the same bytes.
+
+Every command is also a plain function import (`import { dataset, train, eval as evaluate } from "wasmtune"`) if you want it inside a script rather than the CLI.
 
 ## Small-model allowlist
 

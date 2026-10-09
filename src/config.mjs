@@ -36,7 +36,7 @@ export function defaultConfig() {
       maxSteps: 0,
     },
     dpo: { pairsFile: "./.finetune/dpo_pairs.jsonl", beta: 0.1 },
-    grpo: { rewardFile: "./rewards.mjs", numGenerations: 4 },
+    grpo: { rewardFile: "./rewards.py", numGenerations: 4 },
     output: { dir: "./.finetune", webDir: "./public/models" },
   };
 }
@@ -246,6 +246,12 @@ export function validateConfig(cfg, { cwd = process.cwd(), allowLarge = false } 
     }
   }
   if (cfg.method === "dpo" && !cfg.dpo?.pairsFile) errors.push("dpo.pairsFile is required for method=dpo");
-  if (cfg.method === "grpo" && !cfg.grpo?.rewardFile) errors.push("grpo.rewardFile is required for method=grpo");
+  // grpo.rewardFile is optional: the CLI falls back to python/reward.py (recall
+  // + brevity) and writes it to <outDir>/default_reward.py. It used to be
+  // required and pointed at a .mjs the python trainer could never import, which
+  // made GRPO unusable out of the box.
+  if (cfg.method === "grpo" && cfg.grpo?.rewardFile && !cfg.grpo.rewardFile.endsWith(".py")) {
+    errors.push("grpo.rewardFile must be a .py module (imported by the python trainer)");
+  }
   return errors;
 }

@@ -21,7 +21,7 @@
     "maxSteps": 0
   },
   "dpo": { "pairsFile": "./.finetune/dpo_pairs.jsonl", "beta": 0.1 },
-  "grpo": { "rewardFile": "./rewards.mjs", "numGenerations": 4 },
+  "grpo": { "rewardFile": "./rewards.py", "numGenerations": 4 },
   "dataset": {
     "siteName": null,
     "summary": null,

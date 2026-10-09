@@ -157,30 +157,33 @@ export async function loadDpoPairs(pairsFile, cwd = process.cwd()) {
     .map((l) => JSON.parse(l));
 }
 
-// GRPO needs {prompt} + a reward function (user-supplied JS module exporting
-// `reward(prompt, completion)` -> number). v1 seeds prompts from SFT users.
+// GRPO needs {prompt} + a reward function. v1 seeds prompts from SFT users.
+//
+// The reference answer travels with the row: without it a reward has nothing to
+// measure correctness against and can only judge length — which is how the old
+// default came to reward long answers. The python side reads this column (TRL
+// forwards extra dataset columns to the reward fn); non-GRPO consumers ignore
+// it. See python/reward.py.
 export function sftToGrpoSeed(sftPairs, { maxPrompts = 2000 } = {}) {
   const out = [];
   const seen = new Set();
   for (const p of sftPairs) {
     if (out.length >= maxPrompts) break;
     const user = p.messages.find((m) => m.role === "user")?.content ?? "";
+    const assistant = p.messages.find((m) => m.role === "assistant")?.content ?? "";
     if (!user || seen.has(user)) continue;
     seen.add(user);
-    out.push({ prompt: user, meta: { ...p.meta, kind: "seed-grpo" } });
+    out.push({
+      prompt: user,
+      reference: assistant,
+      meta: { ...p.meta, kind: "seed-grpo" },
+    });
   }
   return out;
 }
 
-export const DEFAULT_REWARD_MJS = `// wasmtune GRPO reward stub — replace with your own scoring.
-// Export reward(prompt, completion) -> number (higher is better).
-export function reward(prompt, completion) {
-  if (!completion || !completion.trim()) return 0;
-  // Prefer answers that reuse distinctive source terms.
-  const terms = String(prompt).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 5).slice(0, 8);
-  const lower = String(completion).toLowerCase();
-  let score = Math.min(completion.length / 500, 1);
-  for (const t of terms) if (lower.includes(t)) score += 0.2;
-  return score;
-}
-`;
+// A GRPO reward stub is not shipped as .mjs: the trainer imports a *python*
+// module (importlib cannot load .mjs, and the old stub was never reachable —
+// see bin/wasmtune.mjs#resolveRewardFile). The default is python/reward.py,
+// copied to <outDir>/default_reward.py on every run so it can be edited in place.
+

@@ -7,6 +7,7 @@ import { buildDataset } from "../src/dataset/index.mjs";
 import { chunkDocs } from "../src/dataset/chunk.mjs";
 import { chunksToQa, compressAnswer, commandDensity, extractCodeExamples } from "../src/dataset/qa.mjs";
 import { conversationalSeeds } from "../src/dataset/converse.mjs";
+import { sftToGrpoSeed } from "../src/dataset/dpo.mjs";
 
 describe("dataset", () => {
   it("chunks deterministically with dedup", () => {
@@ -37,6 +38,26 @@ describe("dataset", () => {
     assert.ok(report.answerChars.p50 <= 800, `p50 too long: ${report.answerChars.p50}`);
     assert.ok(report.dpoSeedPairs >= 1);
     assert.ok(report.grpoSeedPrompts >= 1);
+  });
+
+  it("carries the reference answer on each grpo seed row", async () => {
+    // A reward that cannot see the reference can only judge length — which is
+    // how the shipped default came to reward rambling. The reference is the
+    // only thing that makes a factual reward possible.
+    const pairs = [
+      { messages: [{ role: "user", content: "Where are keys stored?" }, { role: "assistant", content: "In ~/.config/lumen/credentials.json" }] },
+      { messages: [{ role: "user", content: "How do I deploy?" }, { role: "assistant", content: "Run the build step." }] },
+    ];
+    const seeds = sftToGrpoSeed(pairs);
+    assert.equal(seeds.length, 2);
+    for (const s of seeds) {
+      assert.equal(typeof s.prompt, "string");
+      assert.ok(s.prompt.length > 0);
+      assert.equal(typeof s.reference, "string");
+      assert.ok(s.reference.length > 0, `seed for ${JSON.stringify(s.prompt)} has no reference`);
+    }
+    assert.equal(seeds[0].reference, "In ~/.config/lumen/credentials.json");
+    assert.equal(seeds[0].meta.kind, "seed-grpo");
   });
 });
 

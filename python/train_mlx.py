@@ -80,11 +80,26 @@ def main():
     with open(ds_path) as f:
         rows = [json.loads(l) for l in f if l.strip()]
 
+    # Same shape as train_unsloth.py: print the resolved config, including the
+    # reward module, and stop before any optimizer step.
     if cfg.get("dryRun"):
-        rows = rows[:8]
-        print(f"[dry-run] {method}: {len(rows)} rows on MLX ({model_id}), no optimizer steps", file=sys.stderr)
+        summary = {
+            "method": method,
+            "model": model_id,
+            "backend": "mlx",
+            "rows": len(rows),
+            "epochs": cfg.get("epochs", 2),
+            "batchSize": cfg.get("batchSize", 2),
+            "lr": cfg.get("lr", 2e-4),
+            "maxSteps": cfg.get("maxSteps", 0) or None,
+            "mlxImpl": cfg.get("mlxImpl", "auto"),
+            "rewardPy": cfg.get("rewardPy") if method == "grpo" else None,
+            "systemPrompt": cfg.get("systemPrompt"),
+            "outputDir": out,
+        }
+        print("[dry-run] " + json.dumps(summary, indent=2), file=sys.stderr)
         with open(os.path.join(out, "dry_run.json"), "w") as f:
-            json.dump({"method": method, "rows": len(rows), "model": model_id, "backend": "mlx"}, f, indent=2)
+            json.dump(summary, f, indent=2)
         return
 
     # Prefer the Unsloth-compatible surface so scripts stay portable,
@@ -168,7 +183,14 @@ def main():
                 max_seq_length=int(cfg.get("maxSeqLen", 2048)),
                 seed=int(cfg.get("seed", 42)),
             )
-            trainer = Trainer(model=model, tokenizer=tokenizer, train_dataset=rows, args=args)
+            # This path had no reward at all before: GRPOConfig was built with
+            # nothing to score against. Load the same module the CUDA path uses
+            # (bin/wasmtune.mjs#resolveRewardFile writes it) so both backends
+            # reward the same thing. unsloth_mlx takes reward_funcs as *paths*.
+            reward_paths = [cfg["rewardPy"]] if cfg.get("rewardPy") else None
+            trainer = Trainer(model=model, tokenizer=tokenizer,
+                              train_dataset=rows, args=args,
+                              reward_funcs=reward_paths)
         trainer.train()
         model.save_pretrained(os.path.join(out, "adapters"))
         with open(os.path.join(out, "train.report.json"), "w") as f:

@@ -175,18 +175,112 @@ lumen push --config lumen.config.ts</code></pre>
   <section class="panel" id="quick">
     <div class="panel-head">
       <h2>Put this on your own site</h2>
-      <p>Five lines. Point <code>dataDir</code> at your content folder and the pipeline crawls it.</p>
+      <p>A couple of commands. Point <code>dataDir</code> at your content folder and the pipeline crawls it (HTML becomes Markdown, not a tag-free word stream).</p>
     </div>
-    <pre class="code"><code>npx wasmtune dataset &amp;&amp; npx wasmtune train &amp;&amp; npx wasmtune eval &amp;&amp; npx wasmtune convert</code></pre>
+    <pre class="code"><code>npx wasmtune dataset     # crawl dataDir -> QA-heavy training set
+npx wasmtune train        # LoRA locally: Unsloth+CUDA, or MLX on Apple Silicon
+npx wasmtune eval         # gate: tuned must beat base, or this exits non-zero
+npx wasmtune convert      # GGUF + MLC (q4f16_1) + ONNX -> one manifest
+npx wasmtune eval-onnx    # scores the artifact that actually ships
+HF_TOKEN=hf_… npx wasmtune publish   # optional: Hub upload + manifest entry</code></pre>
     <pre class="code"><code>&lt;script type="module"&gt;
   import { mountAssistant } from "wasmtune/chat";
   await mountAssistant({ target: "#chat", siteName: "Lumen" });
 &lt;/script&gt;</code></pre>
     <p class="fine">
+      <b>Two commands that are easy to skip and shouldn't be.</b>
+      <code>eval-onnx</code> runs <em>after</em> convert because <code>eval</code> scores fp16 weights
+      while the browser loads a quantized graph — it fails the run if quantization cost more than 10%.
+      <code>publish</code> is separate from <code>convert</code> on purpose: retraining is
+      nondeterministic, so a build hook must not churn published weights.
+      Run <code>npx wasmtune train --dry-run</code> to see the resolved config and which reward
+      module will fire, before anything installs.
+    </p>
+    <p class="fine">
       The first visitor downloads the weights once and the browser caches them; every later visit is offline.
       This page calls exactly the two lines above — the panel above is a few more
       <code>wasmtune/chat</code> exports (<code>detectHardware</code>, <code>fitReport</code>,
       <code>pickModel</code>) used for display.
+    </p>
+  </section>
+
+  <section class="panel" id="method">
+    <div class="panel-head">
+      <h2>Four methods, and which one to actually use</h2>
+      <p>This is the question that comes up first, and the honest answer is usually "SFT".</p>
+    </div>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead><tr><th></th><th>what it optimizes</th><th>use it for</th></tr></thead>
+        <tbody>
+          <tr><th><code>sft</code></th><td>next-token match to a reference answer</td><td class="win"><b>facts</b> — the validated path</td></tr>
+          <tr><th><code>dpo</code></th><td>a good answer ranks above a bad one</td><td>removing one specific bad behaviour</td></tr>
+          <tr><th><code>orpo</code></th><td>DPO with no reference model</td><td>shaping when memory is tight (Macs)</td></tr>
+          <tr><th><code>grpo</code></th><td>RL against a reward function</td><td>optimizing a measurable property</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>What the default GRPO reward does, and what it can't do</h3>
+    <p>
+      It counts how many of the reference answer's distinctive terms survive into the completion,
+      and halves the score past 3× the reference length. Same signal <code>wasmtune eval</code>
+      measures, so improvements show up in eval rather than a private metric.
+    </p>
+    <p>
+      Two limits worth stating. It rewards the <em>right words appearing</em>, not the <em>right value
+      being produced</em> — <code>keys</code>, <code>config</code> and <code>credentials</code> all
+      appear in both <code>~/.config/lumen/credentials.json</code> and
+      <code>~/.config/lumen/API_KEYS.env</code>, so those two score identically. And it cannot
+      recover a fact the corpus never contained. If your facts collide like that, write your own
+      reward comparing against the reference string.
+    </p>
+    <p class="fine">
+      The default used to be <code>min(len(c) / 500, 1.0)</code> — it rewarded
+      <em>length</em>, so the optimal strategy was to pad. It also turned out
+      <code>grpo.rewardFile</code> was dead entirely: the template shipped
+      <code>./rewards.mjs</code>, the Python trainer loads with <code>importlib</code> (which
+      cannot import <code>.mjs</code>), and nothing passed the path through — so every GRPO run
+      silently used the length reward. It points at a <code>.py</code> module now.
+    </p>
+    <pre class="code"><code>// rewards.py — export reward(prompts, completions, reference=None) -> list[float]
+def reward(prompts, completions, reference=None, **kw):
+    refs = reference if isinstance(reference, (list, tuple)) else [reference] * len(completions)
+    return [1.0 if c.strip() == (refs[i] or "").strip() else 0.0
+            for i, c in enumerate(completions)]</code></pre>
+    <pre class="code"><code>{ "method": "grpo", "grpo": { "rewardFile": "./rewards.py", "numGenerations": 4 } }</code></pre>
+  </section>
+
+  <section class="panel" id="corpus">
+    <div class="panel-head">
+      <h2>What actually decides whether this works</h2>
+      <p>Not the method. The corpus.</p>
+    </div>
+    <p>
+      Knowledge capacity scaling laws (Allen-Zhu &amp; Li, arXiv:2404.05405) put storage at roughly
+      <b>2 bits per parameter</b> — so a 0.5B model holds on the order of 125 MB of facts. The
+      corpus behind this demo is about 5 KB. The model has room for something like 25,000× more
+      than it was given. What it did not get is <em>exposure</em>.
+    </p>
+    <div class="table-scroll">
+      <table class="matrix">
+        <thead><tr><th></th><th>evidence</th><th>verdict here</th></tr></thead>
+        <tbody>
+          <tr><th>Repetition / coverage</th><td>recall rises with how often a fact is seen</td><td class="win"><b>the real fix</b> — more passages per fact, or <code>--synth</code> paraphrases</td></tr>
+          <tr><th>Full FT instead of LoRA</th><td><i>LoRA Learns Less and Forgets Less</i> (arXiv:2405.09673): low-rank LoRA substantially underperforms full FT on the target domain</td><td>buys something, costs the consumer-GPU premise</td></tr>
+          <tr><th>Mixing known with new facts</th><td>arXiv:2502.14502: a mixture beats packing new facts alone into the adapter</td><td>what a bigger <code>dataDir</code> and <code>--synth</code> give you</td></tr>
+          <tr><th>RL with a factual reward</th><td>MedFact-R1 (arXiv:2509.15154): up to <b>+22.5pp</b> absolute factual accuracy</td><td>reshapes what the model emits; cannot add knowledge</td></tr>
+          <tr><th>Knowledge editing</th><td>ROME / MEMIT — effective at LLM scale, brittle at 0.5B</td><td>out of scope</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="fine">
+      Which is why the demo answers the way it does. Six pages, 51 training pairs, ~150 gradient
+      steps: the model picks up the vocabulary without anchoring the values, and two facts that
+      were <em>literally in the training data</em> did not survive. On this corpus,
+      <code>eval-onnx</code> reports a small, honest delta rather than a story — more epochs on 51
+      pairs overfit and make it worse. Put more content in <code>dataDir</code>, especially more
+      passages covering the same facts, and read <code>untraced</code> in
+      <code>eval.report.json</code> to see which facts are confabulated rather than learned.
     </p>
   </section>
 

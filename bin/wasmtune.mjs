@@ -216,7 +216,7 @@ async function trainOne(config, outDir, opts, cwd) {
     dryRun: !!opts["dry-run"],
     beta: config.dpo.beta,
     numGenerations: config.grpo.numGenerations,
-    rewardPy: null,
+    rewardPy: await resolveRewardFile(config, outDir, cwd),
   };
   // DPO/ORPO merges three sources (deduped by prompt+rejected): the user's pairsFile,
   // the auto seeds from `wasmtune dataset`, and loop contrasts mined by
@@ -394,6 +394,30 @@ async function cmdBuild(opts, cwd) {
   console.error("[wasmtune] build: done — model manifest ready for deploy");
 }
 
+// Always hand the trainer a concrete reward module, so the default and the
+// user's override travel the same path. Writing it into outDir means a host can
+// open the file the run actually used and edit it, rather than guessing what
+// applied.
+//
+// Must be a .py: it is imported inside the python training venv. The old
+// template shipped "./rewards.mjs", which importlib cannot load, so the
+// override silently never applied and every GRPO run used the fallback reward.
+async function resolveRewardFile(config, outDir, cwd) {
+  const explicit = config.grpo?.rewardFile && path.resolve(cwd, config.grpo.rewardFile);
+  if (explicit && existsSync(explicit)) {
+    if (!explicit.endsWith(".py")) {
+      throw new Error(
+        `grpo.rewardFile must be a .py module (it is imported by the python ` +
+        `trainer), got: ${config.grpo.rewardFile}`);
+    }
+    return explicit;
+  }
+  const src = path.resolve(cwd, "python/reward.py");
+  if (!existsSync(src)) return null;
+  const dest = path.join(outDir, "default_reward.py");
+  await writeFile(dest, await readFile(src, "utf8"));
+  return dest;
+}
 /**
  * Upload converted browser artifacts to the Hugging Face Hub.
  *

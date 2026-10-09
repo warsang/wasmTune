@@ -1,0 +1,10 @@
+# .npmignore — never ship build residue into the tarball.
+# Overrides .gitignore for pack purposes; keep it narrow so `files` in
+# package.json stays the source of truth for what ships.
+
+python/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.DS_Store

@@ -64,8 +64,13 @@ def to_hf_dataset(rows, kind, tokenizer=None, system_prompt=None):
             {"prompt": r["prompt"], "chosen": r["chosen"], "rejected": r["rejected"]}
             for r in rows if r.get("prompt") and r.get("chosen") and r.get("rejected")
         ])
-    # grpo: prompts only; rewards come from --reward-py (python fn) if provided
-    return Dataset.from_list([{"prompt": r["prompt"]} for r in rows if r.get("prompt")])
+    # grpo: prompts plus the reference answer, so the default reward can score
+    # correctness instead of only length. Extra keys travel with the row; TRL
+    # ignores columns it does not use.
+    return Dataset.from_list([
+        {"prompt": r["prompt"], "reference": r.get("reference", "")}
+        for r in rows if r.get("prompt")
+    ])
 
 
 def main():
@@ -125,11 +130,31 @@ def main():
     ds_path = {"sft": cfg["sftFile"], "dpo": cfg["dpoFile"], "orpo": cfg["dpoFile"], "grpo": cfg["grpoFile"]}[method]
     with open(ds_path) as f:
         rows = [json.loads(l) for l in f if l.strip()]
-    if cfg.get("maxSteps", 0) and cfg.get("dryRun"):
-        rows = rows[:8]
-        print(f"[dry-run] {method}: {len(rows)} rows, no optimizer steps", file=sys.stderr)
+
+    # A dry run should answer "what exactly will this run do?" - so it prints
+    # the resolved config, including which reward module fires for grpo, and
+    # stops before any optimizer step. It also used to require maxSteps to be
+    # set, which nobody does, so --dry-run silently did nothing at all.
+    if cfg.get("dryRun"):
+        summary = {
+            "method": method,
+            "model": model_id,
+            "backend": "unsloth",
+            "rows": len(rows),
+            "epochs": cfg.get("epochs", 2),
+            "batchSize": cfg.get("batchSize", 2),
+            "gradAccum": cfg.get("gradAccum", 4),
+            "lr": cfg.get("lr", 2e-4),
+            "maxSeqLen": cfg.get("maxSeqLen", 2048),
+            "maxSteps": cfg.get("maxSteps", 0) or None,
+            "lora": lora,
+            "rewardPy": cfg.get("rewardPy"),
+            "systemPrompt": cfg.get("systemPrompt"),
+            "outputDir": out,
+        }
+        print("[dry-run] " + json.dumps(summary, indent=2), file=sys.stderr)
         with open(os.path.join(out, "dry_run.json"), "w") as f:
-            json.dump({"method": method, "rows": len(rows), "model": model_id}, f, indent=2)
+            json.dump(summary, f, indent=2)
         return
     dataset = to_hf_dataset(rows, method, tokenizer, cfg.get("systemPrompt"))
 
@@ -174,13 +199,19 @@ def main():
         reward_fn = None
         rpy = cfg.get("rewardPy")
         if rpy and os.path.exists(rpy):
+            # The CLI always writes one: the user's grpo.rewardFile when set,
+            # otherwise python/reward.py copied to <outDir>/default_reward.py.
+            # Leaving it null previously fell back to a reward that rewarded
+            # *length*, which is the opposite of this package's brevity doctrine.
             import importlib.util
             spec = importlib.util.spec_from_file_location("site_reward", rpy)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             reward_fn = getattr(mod, "reward", None)
         if reward_fn is None:
-            reward_fn = lambda prompts, completions, **kw: [min(len(c) / 500, 1.0) for c in completions]
+            raise RuntimeError(
+                "GRPO needs a reward function: the CLI should have written "
+                "<outDir>/default_reward.py, or set grpo.rewardFile")
         targs = GRPOConfig(
             output_dir=out, num_generations=int(cfg.get("numGenerations", 4)),
             per_device_train_batch_size=int(cfg.get("batchSize", 2)),
