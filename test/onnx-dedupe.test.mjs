@@ -36,9 +36,49 @@ describe("onnx dedupe: convert wiring", () => {
     // runPython finds the venv via venvPaths(outDir). convertModel's outDir is
     // the *web* output dir, which has no venv, so the dedupe would silently
     // fall back to a bare python3.
+    //
+    // It must not be derived from mergedDir either. That worked for the
+    // single-model layout (<out>/run/merged -> <out>) but in multi-model mode
+    // mergedDir is <out>/<slug>/run/merged, so two levels up is <out>/<slug> —
+    // which also has no venv. The CLI therefore passes config.output.dir in as
+    // venvOutDir, and the mergedDir guess is only a last resort.
     const s = src();
-    assert.match(s, /const finetuneOut = path\.resolve\(mergedDir, "\.\.", "\.\."\)/);
+    assert.match(s, /venvOutDir = null/);
+    assert.match(s, /const finetuneOut = venvOutDir\s*\n\s*\? path\.resolve\(venvOutDir\)/);
     assert.match(s, /outDir: finetuneOut/);
+    // The CLI must actually hand it over, or the parameter is unused and the
+    // bug it fixes is still live for every caller.
+    const bin = readFileSync(
+      new URL("../bin/wasmtune.mjs", import.meta.url), "utf8");
+    assert.match(bin, /venvOutDir: path\.resolve\(cwd, config\.output\.dir\)/);
+  });
+
+  it("asks optimum for an explicit task", () => {
+    // optimum infers the task from a model *id*, not a local directory: both
+    // 1.23 and 2.x raise "Cannot infer the task from a local directory yet".
+    // Without --task every ONNX export of merged local weights failed.
+    const s = src();
+    assert.match(s, /"--task",\s*"text-generation"/);
+  });
+
+  it("verifies the export artifact instead of trusting optimum's exit code", () => {
+    // With torch >= 2.14 the exporter writes model.onnx_data while optimum 1.x
+    // looks for model.onnx.data and raises FileNotFoundError out of its own
+    // cleanup — after a complete, onnxruntime-loadable export. Trusting the
+    // exit code made convert report a working export as "onnx skipped".
+    const s = src();
+    assert.match(s, /let exportError = null/);
+    assert.match(s, /const onnxGraph = path\.join\(out, "model\.onnx"\)/);
+    assert.match(s, /existsSync\(onnxGraph\)/);
+  });
+
+  it("dedupes the file q8 is actually written to", () => {
+    // quantize_onnx.py maps q8 -> model_quantized.onnx. The dedupe loop used to
+    // list model_q8.onnx, which quantize never writes, so the shipped q8 tier
+    // was never deduped while the never-created file was checked.
+    const s = src();
+    assert.match(s, /"model_quantized\.onnx"/);
+    assert.doesNotMatch(s, /"model_q8\.onnx"/);
   });
 
   it("treats a dedupe failure as non-fatal", () => {

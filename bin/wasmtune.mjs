@@ -347,6 +347,7 @@ async function cmdConvert(opts, cwd) {
         subdir: multi ? slug : null, label: entry.label,
         siteName: config.dataset?.siteName ?? path.basename(config.dataDir),
         requirements: entry.requirements, writeManifest: false,
+        venvOutDir: path.resolve(cwd, config.output.dir),
       });
       outEntries.push(built);
       notes.push(...n.map((x) => `${slug}: ${x}`));
@@ -629,11 +630,20 @@ async function cmdEvalOnnx(opts, cwd) {
     return;
   }
 
-  const outDir = path.resolve(cwd, entryConfig(config, trained[0], multi).relOut);
+  // `eval` and `eval-onnx` must agree on where a tier's files live. In multi
+  // mode that is <output.dir>/<slug>, but a run that started before models[] was
+  // added (or a host that runs `wasmtune eval` config-free) leaves them directly
+  // in <output.dir>. Accept either rather than failing a gate because a path
+  // convention changed mid-project.
+  const perTier = path.resolve(cwd, entryConfig(config, trained[0], multi).relOut);
+  const shared = path.resolve(cwd, config.output.dir);
+  const outDir = [perTier, shared].find((d) =>
+    existsSync(path.join(d, "eval.prompts.jsonl"))) ?? perTier;
   const promptsPath = path.join(outDir, "eval.prompts.jsonl");
   if (!existsSync(promptsPath)) {
     console.error(
-      "[wasmtune] eval-onnx skipped: no eval.prompts.jsonl under " + outDir +
+      "[wasmtune] eval-onnx skipped: no eval.prompts.jsonl under " + perTier +
+      " or " + shared +
       " — run `wasmtune eval` first (it builds the same holdout the training " +
       "gate used, so the two numbers are comparable)");
     return;

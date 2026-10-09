@@ -107,6 +107,10 @@ export async function convertModel({
   source = "tuned",
   requirements = null,
   writeManifest = true,
+  // Directory holding the training venv (config.output.dir). Passed in
+  // because deriving it from mergedDir only works for the single-model
+  // layout; see the finetuneOut assignment below.
+  venvOutDir = null,
 } = {}) {
   await mkdir(webDir, { recursive: true });
   const outDir = subdir ? path.join(webDir, subdir) : webDir;
@@ -177,7 +181,40 @@ export async function convertModel({
   if (optimum && mergedDir && existsSync(mergedDir)) {
     try {
       const out = path.join(outDir, "onnx");
-      await execAsync(optimum, ["export", "onnx", "--model", mergedDir, out]);
+      // --task is not optional. optimum infers the task from a *model id*, not
+      // from a local directory: both 1.23 and 2.x raise "Cannot infer the task
+      // from a local directory yet". So every ONNX export from a merged local
+      // dir failed with a traceback that sounds like an optimum bug rather than
+      // a missing flag. Qwen2ForCausalLM is a text-generation task.
+      let exportError = null;
+      try {
+        await execAsync(optimum, [
+          "export", "onnx",
+          "--model", mergedDir,
+          "--task", "text-generation",
+          out,
+        ]);
+      } catch (e) {
+        exportError = e;
+      }
+
+      // optimum's exit code is not trustworthy on Windows. With torch >= 2.14 the
+      // exporter writes the external weights as `model.onnx_data`, while optimum
+      // 1.x looks for `model.onnx.data` and raises FileNotFoundError out of its
+      // own cleanup step — after the export has fully succeeded and written a
+      // valid graph + weights. Trusting the exit code here made convert report a
+      // complete, onnxruntime-loadable export as "onnx skipped", which is how a
+      // working pipeline stops shipping its ONNX tier. Verify the artifact.
+      const onnxGraph = path.join(out, "model.onnx");
+      if (!existsSync(onnxGraph)) {
+        throw exportError ?? new Error("optimum-cli produced no model.onnx");
+      }
+      if (exportError) {
+        notes.push(
+          `onnx: optimum-cli exited non-zero but wrote a loadable model.onnx ` +
+          `(its cleanup expects model.onnx.data; this torch wrote model.onnx_data) - proceeding`,
+        );
+      }
 
       // 3a. Quantize. optimum writes fp32 (model.onnx), but the widget asks
       // transformers.js for a dtype, and dtype "q8" resolves to
@@ -185,10 +222,12 @@ export async function convertModel({
       // manifest pointing at a q8 export against an unquantized directory 404s
       // the graph and the widget reports engine "unavailable". Quantizing here
       // is what makes the manifest line honest.
-      const finetuneOut = path.resolve(mergedDir, "..", "..");
+      const finetuneOut = venvOutDir
+        ? path.resolve(venvOutDir)
+        : path.resolve(mergedDir, "..", "..");
       const onnxDtypes = await runPython({
         outDir: finetuneOut, script: "python/quantize_onnx.py",
-        args: ["--onnx-dir", out, "--dtypes", "q4f16 q4 q8"], cwd,
+        args: ["--onnx-dir", out, "--dtypes", "q4f16 q4 q8"],
       }).then(() => {
         // Re-read who exists; the script prints for humans, not for us.
         const found = [];
@@ -203,7 +242,14 @@ export async function convertModel({
       // 3b. Dedupe. torch.onnx writes a RoPE table into every decoder layer;
       // merging the byte-identical copies is a 43% size cut on a 0.5B export
       // and changes no arithmetic.
-      for (const f of ["model_q8.onnx", "model_q4.onnx", "model_fp16.onnx", "model.onnx"]) {
+      // Names must match DTYPE_FILE in python/quantize_onnx.py: q8 is served as
+      // model_quantized.onnx, NOT model_q8.onnx. The list used to say
+      // model_q8.onnx, a file quantize never writes, so the shipped q8 tier was
+      // never deduped — the RoPE-table win was silently lost on exactly the
+      // artifact everyone downloads.
+      for (const f of [
+        "model_quantized.onnx", "model_q4.onnx", "model_fp16.onnx", "model.onnx",
+      ]) {
         const src = path.join(out, f);
         if (!existsSync(src)) continue;
         const tmp = path.join(out, `${path.basename(f, ".onnx")}.dedup.onnx`);
@@ -212,7 +258,7 @@ export async function convertModel({
             outDir: finetuneOut, script: "python/dedupe_onnx.py",
             // data-name is the final filename, so renaming the graph into place
             // afterwards keeps its external-data reference valid.
-            args: ["--model", src, "--out", tmp, "--data-name", `${f}_data`], cwd,
+            args: ["--model", src, "--out", tmp, "--data-name", `${f}_data`],
           });
           if (existsSync(tmp)) await rename(tmp, src);
         } catch (e) {
@@ -222,7 +268,13 @@ export async function convertModel({
       }
       entry.artifacts.onnx = rel(out);
     } catch (e) {
-      notes.push(`onnx skipped: ${e.message}`);
+      // Only report "skipped" when there is genuinely nothing to ship.
+      const partial = existsSync(path.join(outDir, "onnx", "model.onnx"));
+      notes.push(
+        partial
+          ? `onnx partial: ${e.message}`
+          : `onnx skipped: ${e.message}`,
+      );
     }
   } else if (source !== "pretrained") {
     notes.push("onnx skipped: optimum-cli not installed (pip install optimum[onnxruntime] for Transformers.js output)");

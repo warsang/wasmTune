@@ -13,3 +13,12 @@ __pycache__/
 unsloth_compiled_cache/
 hf-*.log
 wt-*.config.json
+
+# Converted ONNX artifacts. A single tier is ~0.5 GB of graph + external
+# weights, reproducible from <output.dir>/run/merged via `wasmtune convert`,
+# and the demo serves the tuned tier from the Hub — so they are publish inputs,
+# not repo content. Without this, `git add -A` after a convert stages gigabytes.
+*.onnx
+*.onnx_data
+demo/public/models/*/onnx/
+
