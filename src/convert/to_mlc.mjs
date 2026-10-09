@@ -76,10 +76,11 @@ function chatHints(chat) {
 
 // Build one manifest entry for an untrained (pretrained) allowlist model:
 // served straight from its public browser artifacts, no local conversion.
-export function pretrainedEntry({ model, label = null, gguf = null, chat = null, requirements = null, onnx = null, webllm = null }) {
+export function pretrainedEntry({ model, label = null, gguf = null, chat = null, requirements = null, onnx = null, onnxDtype = null, webllm = null }) {
   const artifacts = {};
   if (webllm) artifacts.webllm = webllm;
   if (onnx) artifacts.onnx = onnx;
+  if (onnxDtype) artifacts.onnxDtype = onnxDtype;
   if (gguf) artifacts.gguf = gguf;
   return {
     id: slugifyModel(model),
@@ -102,6 +103,7 @@ export async function convertModel({
   chat = {},
   subdir = null, // per-entry artifact directory (multi-model builds)
   label = null,
+  siteName = null,
   source = "tuned",
   requirements = null,
   writeManifest = true,
@@ -113,6 +115,7 @@ export async function convertModel({
     label: label ?? modelId,
     base: modelId,
     source,
+    ...(siteName ? { siteName } : {}),
     artifacts: {},
     ...(chatHints(chat) ? { chat: chatHints(chat) } : {}),
     ...(requirements ? { requirements } : {}),
@@ -175,12 +178,31 @@ export async function convertModel({
     try {
       const out = path.join(outDir, "onnx");
       await execAsync(optimum, ["export", "onnx", "--model", mergedDir, out]);
-      // torch.onnx writes a RoPE table into every decoder layer; merging the
-      // byte-identical copies is a 43% size cut on a 0.5B export and changes no
-      // arithmetic. Optional: a failure here must not lose the export.
-      // The venv lives under the finetune out dir, which is two levels above
-      // mergedDir (run/merged), not under webDir.
+
+      // 3a. Quantize. optimum writes fp32 (model.onnx), but the widget asks
+      // transformers.js for a dtype, and dtype "q8" resolves to
+      // model_quantized.onnx — a name nobody has produced at this point. So a
+      // manifest pointing at a q8 export against an unquantized directory 404s
+      // the graph and the widget reports engine "unavailable". Quantizing here
+      // is what makes the manifest line honest.
       const finetuneOut = path.resolve(mergedDir, "..", "..");
+      const onnxDtypes = await runPython({
+        outDir: finetuneOut, script: "python/quantize_onnx.py",
+        args: ["--onnx-dir", out, "--dtypes", "q4f16 q4 q8"], cwd,
+      }).then(() => {
+        // Re-read who exists; the script prints for humans, not for us.
+        const found = [];
+        for (const [dtype, file] of [["q4", "model_q4.onnx"], ["q8", "model_quantized.onnx"]]) {
+          if (existsSync(path.join(out, file))) found.push(dtype);
+        }
+        return found;
+      }).catch(() => []);
+
+      if (onnxDtypes.length) entry.artifacts.onnxDtype = onnxDtypes[0];
+
+      // 3b. Dedupe. torch.onnx writes a RoPE table into every decoder layer;
+      // merging the byte-identical copies is a 43% size cut on a 0.5B export
+      // and changes no arithmetic.
       for (const f of ["model_q8.onnx", "model_q4.onnx", "model_fp16.onnx", "model.onnx"]) {
         const src = path.join(out, f);
         if (!existsSync(src)) continue;
@@ -190,12 +212,9 @@ export async function convertModel({
             outDir: finetuneOut, script: "python/dedupe_onnx.py",
             // data-name is the final filename, so renaming the graph into place
             // afterwards keeps its external-data reference valid.
-            args: ["--model", src, "--out", tmp, "--data-name", `${f}_data`],
-            cwd,
+            args: ["--model", src, "--out", tmp, "--data-name", `${f}_data`], cwd,
           });
-          if (existsSync(tmp)) {
-            await rename(tmp, src);
-          }
+          if (existsSync(tmp)) await rename(tmp, src);
         } catch (e) {
           notes.push(`onnx dedupe skipped for ${f}: ${e.message}`);
           await rm(tmp, { force: true }).catch(() => {});
@@ -220,6 +239,9 @@ export async function convertModel({
     artifacts: entry.artifacts, // legacy mirror of models[0]
     notes,
   };
+  // The site name the fine-tune was trained with, so the widget's system prompt
+  // matches what the weights saw. Without it the two halves drift silently.
+  if (entry.siteName) manifest.dataset = { siteName: entry.siteName };
   if (entry.chat) manifest.chat = entry.chat; // legacy chat location
 
   let manifestPath = null;
@@ -243,6 +265,9 @@ export async function writeModelsManifest({ webDir, entries, notes = [] }) {
     created: new Date().toISOString(),
     models: entries,
     ...(primary ? { base: primary.base ?? null, artifacts: primary.artifacts, ...(primary.chat ? { chat: primary.chat } : {}) } : {}),
+    // The site name the tuned weights were trained with, so the widget's system
+    // prompt matches them. The widget prefers this over its own siteName.
+    ...(primary?.siteName ? { dataset: { siteName: primary.siteName } } : {}),
     notes,
   };
   const manifestPath = path.join(webDir, "model-manifest.json");

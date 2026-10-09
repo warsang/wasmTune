@@ -5,9 +5,13 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
+
+const execFileAsync = promisify(execFile);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, "..");
@@ -44,6 +48,7 @@ Commands:
   dataset [--config <path>] [--synth provider:model]
   train [--config <path>] [--allow-large] [--backend auto|unsloth|mlx] [--max-steps N] [--dry-run] [--python <bin>]
   eval [--config <path>] [--backend auto|unsloth|mlx] [--max-prompts N] [--max-tokens N] [--skip-tuned] [--judge provider:model] [--python <bin>]
+  eval-onnx [--config <path>] [--dtype q4|q8] [--max-tokens N] [--python <bin>] [--force]
   convert [--config <path>]
   publish [--config <path>] --repo <user>/<name> [--token <hf-token>] [--private]
   serve [--config <path>] [--port N]
@@ -91,6 +96,8 @@ function parse(argv) {
     else if (flag === "--synth") out.opts.synth = take();
     else if (flag === "--judge") out.opts.judge = take();
     else if (flag === "--python") out.opts.python = take();
+    else if (flag === "--onnx-dir") out.opts.onnxDir = take();
+    else if (flag === "--force") out.opts.force = true;
     else if (flag === "--allow-large" || flag === "--dry-run" || flag === "--skip-tuned" || flag === "--skip-serve") out.opts[flag.slice(2)] = true;
     else if (a === "--help" || a === "-h") {
       console.error(USAGE);
@@ -338,6 +345,7 @@ async function cmdConvert(opts, cwd) {
       const { entry: built, notes: n } = await convertModel({
         mergedDir, webDir, modelId: entry.model, chat: entry.chat,
         subdir: multi ? slug : null, label: entry.label,
+        siteName: config.dataset?.siteName ?? path.basename(config.dataDir),
         requirements: entry.requirements, writeManifest: false,
       });
       outEntries.push(built);
@@ -395,8 +403,27 @@ async function cmdBuild(opts, cwd) {
  * but requiring an account to fine-tune locally would be a worse trade, so the
  * dependency lives in this one command.
  */
+/**
+ * Upload converted browser artifacts to the Hugging Face Hub.
+ *
+ * Optional by design: without a token this skips loudly and the rest of the
+ * pipeline is unaffected. Weights for a usable chat model run 100 MB - 1 GB,
+ * which no static host will take, so the Hub is the practical home for them —
+ * but requiring an account to fine-tune locally would be a worse trade, so the
+ * dependency lives in this one command.
+ *
+ * Also closes the loop the earlier version left open: it printed a manifest
+ * line for the host to paste and verified nothing, so a publish that landed but
+ * was never wired up looked exactly like never having run it. This writes the
+ * manifest entry and compares the sha256 of the local graph to the repo's LFS
+ * oid.
+ */
 async function cmdPublish(opts, cwd) {
-  const { publish, graphsIn, tokenFor, ensureRepo, uploadFile, writeModelCard, inlineChatTemplate } = await import("../src/publish.mjs");
+  const {
+    graphsIn, tokenFor, ensureRepo, uploadFile, writeModelCard,
+    inlineChatTemplate, writeOnnxManifestEntry, verifyUploaded,
+    sha256File, externalDataRefs,
+  } = await import("../src/publish.mjs");
 
   // Check the credential before anything else: a user with no token should get
   // the skip message, not a config-resolution error.
@@ -412,7 +439,7 @@ async function cmdPublish(opts, cwd) {
 
   const { config } = await resolveConfig(opts, cwd);
 
-  const repoId = opts.repo ?? publish?.repo ?? null;
+  const repoId = opts.repo ?? config.publish?.repo ?? null;
   if (!repoId) {
     throw new Error(
       "publish needs a repo id: pass --repo <user>/<name> or set publish.repo in the config",
@@ -420,38 +447,42 @@ async function cmdPublish(opts, cwd) {
   }
 
   const entries = configModels(config);
-  const webDir = path.resolve(cwd, config.output.webDir);
   const multi = entries.length > 1;
-  let uploaded = 0;
-  const skipped = [];
+  const trained = entries.filter((e) => e.trained);
+  if (!trained.length) {
+    console.error("[wasmtune] publish: no trained entries — everything configured is pretrained, nothing to publish");
+    return;
+  }
 
+  const siteName = siteNameOf(config, cwd);
   console.error(`[wasmtune] publishing to ${repoId}`);
   await ensureRepo({ repoId, token, privateRepo: !!opts.private });
 
-  for (const entry of entries) {
+  let uploaded = 0;
+  let publishedDtype = null;
+  const skipped = [];
+
+  for (const entry of trained) {
     const slug = slugifyModel(entry.model);
-    if (!entry.trained) {
-      skipped.push(`${slug}: served from a public pretrained build, nothing to upload`);
-      continue;
-    }
     const { relOut } = entryConfig(config, entry, multi);
     const onnxDir = path.join(path.resolve(cwd, relOut), "onnx");
-    const graphs = await graphsIn(onnxDir);
+    const graphs = graphsIn(onnxDir);
     if (!graphs.length) {
       skipped.push(`${slug}: no onnx/ graphs at ${onnxDir} — run \`wasmtune convert\` with optimum-cli installed`);
       continue;
     }
     // Smallest first: it is the one transformers.js will fetch on a phone.
     const chosen = graphs[0];
+    publishedDtype = chosen.dtype;
     console.error(`[wasmtune] ${slug}: ${chosen.file} (${(chosen.bytes / 1e6).toFixed(1)} MB, dtype ${chosen.dtype})`);
 
     const sub = multi ? `${slug}/` : "";
-    await uploadFile({ repoId, token, localPath: path.join(onnxDir, chosen.file), pathInRepo: `${sub}onnx/${chosen.file}` });
-    uploaded++;
+    const graphPath = path.join(onnxDir, chosen.file);
+    const graphSha = sha256File(graphPath);
 
-    // The graph is useless without its external data and the tokenizer.
-    const { externalDataRefs } = await import("../src/publish.mjs");
-    for (const ref of externalDataRefs(path.join(onnxDir, chosen.file))) {
+    // External data first, so the graph never references a file that is not
+    // there yet mid-upload.
+    for (const ref of externalDataRefs(graphPath)) {
       const local = path.join(onnxDir, ref);
       if (!existsSync(local)) {
         console.error(`[wasmtune] WARNING: graph references ${ref} but it is not in ${onnxDir}`);
@@ -460,22 +491,41 @@ async function cmdPublish(opts, cwd) {
       await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}onnx/${ref}` });
       uploaded++;
     }
+    await uploadFile({ repoId, token, localPath: graphPath, pathInRepo: `${sub}onnx/${chosen.file}` });
+    uploaded++;
+
+    // The graph is useless without its tokenizer.
+    const mergedDir = path.join(path.resolve(cwd, relOut), "merged");
     for (const f of ["config.json", "generation_config.json", "tokenizer.json",
-                     "tokenizer_config.json", "special_tokens_map.json",
-                     "chat_template.jinja", "vocab.json", "merges.txt"]) {
-      const local = path.join(path.resolve(cwd, relOut), "merged", f);
+                     "special_tokens_map.json", "vocab.json", "merges.txt"]) {
+      const local = path.join(mergedDir, f);
       if (existsSync(local)) {
         await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}${f}` });
         uploaded++;
       }
     }
-    // Last, so it wins over the plain tokenizer_config.json above.
-    const mergedDir = path.join(path.resolve(cwd, relOut), "merged");
-    const inlined = await inlineChatTemplate({ dir: mergedDir }).catch(() => null);
+    // transformers.js reads the chat template from tokenizer_config.json and
+    // ignores the sibling .jinja, so the inlined copy wins and goes last.
+    const inlined = inlineChatTemplate({ dir: mergedDir });
     if (inlined) {
       await uploadFile({ repoId, token, localPath: inlined, pathInRepo: `${sub}tokenizer_config.json` });
       uploaded++;
       console.error(`[wasmtune] ${slug}: inlined chat_template into tokenizer_config.json`);
+    }
+
+    // Verify the bytes that landed are the bytes convert produced. A no-op'd
+    // upload is otherwise indistinguishable from a successful one, and the whole
+    // point of publishing is that what the widget loads is what was trained here.
+    const check = await verifyUploaded({
+      repoId, token, localPath: graphPath,
+      pathInRepo: `${sub}onnx/${chosen.file}`, sha256: graphSha,
+    }).catch((e) => ({ ok: null, error: String(e?.message ?? e) }));
+    if (check.ok === true) {
+      console.error(`[wasmtune] verified ${chosen.file} in ${repoId} (sha256 ${graphSha.slice(0, 12)}…)`);
+    } else if (check.ok === false) {
+      console.error(`[wasmtune] WARNING: ${chosen.file} in ${repoId} does not match the local graph — the upload may not have landed`);
+    } else if (check.error) {
+      console.error(`[wasmtune] could not verify ${chosen.file}: ${check.error}`);
     }
   }
 
@@ -486,8 +536,9 @@ async function cmdPublish(opts, cwd) {
   }
 
   const card = await writeModelCard({
-    dir: cwd, siteName: config.dataset.siteName ?? path.basename(config.dataDir),
-    baseModel: config.model, dtype: (await graphsIn(path.join(path.resolve(cwd, entryConfig(config, entries[0], multi).relOut), "onnx")))[0]?.dtype ?? "q8",
+    dir: cwd, siteName, baseModel: config.model,
+    dtype: publishedDtype, repoId,
+    evalReport: readEvalReport(cwd, config, multi, trained[0]),
   }).catch(() => null);
   if (card) {
     await uploadFile({ repoId, token, localPath: card, pathInRepo: "README.md" });
@@ -495,10 +546,115 @@ async function cmdPublish(opts, cwd) {
   }
 
   console.error(`[wasmtune] published ${uploaded} file(s) -> https://huggingface.co/${repoId}`);
-  console.error(`[wasmtune] point a manifest tier at it with: { "onnx": "${repoId}" }`);
+
+  // Close the loop: write the manifest entry rather than asking the host to.
+  const manifestRel = config.output?.webDir ?? "public/models";
+  const manifestPath = path.join(cwd, manifestRel, "model-manifest.json");
+  const { entry: written } = writeOnnxManifestEntry({
+    manifestPath, repoId, dtype: publishedDtype, siteName,
+    label: trained[0].label ?? null, base: config.model, chat: config.chat ?? null,
+  });
+  console.error(`[wasmtune] wrote ${written.id} -> ${manifestPath}`);
+  console.error("[wasmtune] the site loads it with: await mountAssistant({ target: \"#chat\" })");
   for (const s of skipped) console.error(`note: ${s}`);
 }
 
+function siteNameOf(config, cwd) {
+  return config.dataset?.siteName ?? path.basename(path.resolve(cwd));
+}
+
+function readEvalReport(cwd, config, multi, entry) {
+  if (!entry) return null;
+  const p = path.join(path.resolve(cwd, entryConfig(config, entry, multi).relOut), "eval.report.json");
+  if (!existsSync(p)) return null;
+  try {
+    const r = JSON.parse(readFileSync(p, "utf8"));
+    return { base: r.base, tuned: r.tuned, delta: r.delta };
+  } catch { return null; }
+}
+
+/**
+ * Evaluate the artifact that ships, not the weights eval scored.
+ *
+ * `wasmtune eval` scores the merged fp16 output of `export.py`. What the widget
+ * loads is the quantized ONNX graph, and those are different models: measured on
+ * the same 39 holdout prompts, q8 costs ~30% of average score, ~58% of
+ * generalization score and introduces repetition loops that fp16 did not have.
+ * Nothing caught that before, because no gate looked at the artifact.
+ *
+ * Optional by design: without onnxruntime installed this loud-skips, so a host
+ * that has not installed the export tooling is not blocked.
+ */
+async function cmdEvalOnnx(opts, cwd) {
+  const config = (await resolveConfig(opts, cwd)).config;
+  const entries = configModels(config);
+  const trained = entries.filter((e) => e.trained);
+  if (!trained.length) {
+    console.error("[wasmtune] eval-onnx: no trained entries to evaluate");
+    return;
+  }
+
+  const multi = entries.length > 1;
+  const webDir = path.resolve(cwd, config.output.webDir);
+  const graphDir = path.resolve(cwd, opts.onnxDir ?? path.join(webDir, "onnx"));
+  if (!existsSync(graphDir)) {
+    console.error(
+      "[wasmtune] eval-onnx skipped: no onnx/ under " + graphDir +
+      " — run `wasmtune convert` with optimum-cli installed first " +
+      "(or pass --onnx-dir)");
+    return;
+  }
+
+  const outDir = path.resolve(cwd, entryConfig(config, trained[0], multi).relOut);
+  const promptsPath = path.join(outDir, "eval.prompts.jsonl");
+  if (!existsSync(promptsPath)) {
+    console.error(
+      "[wasmtune] eval-onnx skipped: no eval.prompts.jsonl under " + outDir +
+      " — run `wasmtune eval` first (it builds the same holdout the training " +
+      "gate used, so the two numbers are comparable)");
+    return;
+  }
+
+  const systemPrompt = (await import("../src/chat/options.mjs"))
+    .defaultSystemPrompt(config.dataset?.siteName ?? path.basename(config.dataDir));
+
+  console.error("[wasmtune] evaluating the quantized artifact that the widget loads");
+  await execFileAsync("node", [
+    "scripts/onnx-eval.mjs",
+    "--onnx-dir", graphDir,
+    "--prompts", promptsPath,
+    "--out", path.join(outDir, "eval.onnx.json"),
+    "--dtype", opts.dtype ?? "q8",
+    "--max-tokens", String(opts.maxTokens ?? 96),
+    "--system-prompt", systemPrompt,
+    "--python", opts.python ?? "python3",
+  ], { cwd: process.cwd() });
+
+  // Regression gate: compare against the fp16 eval the model was trained against.
+  const fp16Path = path.join(outDir, "eval.report.json");
+  const onnxPath = path.join(outDir, "eval.onnx.json");
+  if (!existsSync(fp16Path) || !existsSync(onnxPath)) return;
+
+  const fp16 = JSON.parse(readFileSync(fp16Path, "utf8")).tuned;
+  const onnx = JSON.parse(readFileSync(onnxPath, "utf8"));
+  if (!fp16 || !onnx) return;
+
+  const drop = (a, b) => (a == null || b == null ? 0 : Number(a) - Number(b));
+  const avgDrop = drop(fp16.avg, onnx.avg);
+  const THRESHOLD = Number(process.env.WASMTUNE_QUANT_DROP ?? 0.1);
+  console.error(
+    `[wasmtune] quantization cost: avg ${(fp16.avg ?? 0).toFixed(3)} -> ${(onnx.avg ?? 0).toFixed(3)}` +
+    ` (${avgDrop >= 0 ? "-" : "+"}${Math.abs(avgDrop).toFixed(3)}),` +
+    ` faithful ${(fp16.faithfulness ?? 0).toFixed(3)} -> ${(onnx.faithfulness ?? 0).toFixed(3)}`);
+
+  if (avgDrop > THRESHOLD && !opts.force) {
+    console.error(
+      `[wasmtune] eval-onnx FAILED: the shipped q8 artifact scores ${avgDrop.toFixed(3)} below the\n` +
+      `  fp16 weights it was quantized from. Publish anyway with --force, or raise\n` +
+      `  WASMTUNE_QUANT_DROP (currently ${THRESHOLD}) if this loss is expected for the model.`);
+    process.exitCode = 1;
+  }
+}
 async function cmdServe(opts, cwd) {
   const { config } = await loadConfig(cwd, opts.config ?? null).catch(() => ({ config: null }));
   const port = opts.port ?? 8080;
@@ -524,6 +680,7 @@ async function main() {
   if (cmd === "dataset") return cmdDataset(opts, cwd);
   if (cmd === "train") return cmdTrain(opts, cwd);
   if (cmd === "eval") return cmdEval(opts, cwd);
+if (cmd === "eval-onnx") return cmdEvalOnnx(opts, cwd);
   if (cmd === "convert") return cmdConvert(opts, cwd);
   if (cmd === "publish") return cmdPublish(opts, cwd);
   if (cmd === "build") return cmdBuild(opts, cwd);

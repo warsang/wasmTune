@@ -25,17 +25,21 @@ describe("publish: token resolution", () => {
 
 describe("publish: graph discovery", () => {
   it("maps dtypes to the filenames transformers.js actually requests", () => {
-    // The trap: dtype q8 is served as "model_quantized.onnx", not
-    // "model_q8.onnx". Getting this wrong 404s the graph and nothing in the
-    // pipeline notices until a browser tries to load it.
+    // The trap is one entry: dtype "q8" is served as "model_quantized.onnx", so
+    // model_q8.onnx is a name transformers.js will never request. int8 and
+    // uint8 DO map to themselves and must keep doing so.
     assert.equal(DTYPE_SUFFIX.q8, "model_quantized.onnx");
-    assert.equal(DTYPE_SUFFIX.q4, "model_q4.onnx");
-    assert.equal(DTYPE_SUFFIX.q4f16, "model_q4f16.onnx");
-    assert.equal(DTYPE_SUFFIX.fp32, "model.onnx");
-    // No dtype may map to a name transformers.js would never ask for.
-    for (const name of Object.values(DTYPE_SUFFIX)) {
-      assert.match(name, /^model(_[a-z0-9]+)?\.onnx$/);
+    assert.equal(DTYPE_SUFFIX.int8, "model_int8.onnx");
+    assert.equal(DTYPE_SUFFIX.uint8, "model_uint8.onnx");
+    for (const [dtype, name] of Object.entries(DTYPE_SUFFIX)) {
+      assert.match(name, /^model(_[a-z0-9]+)?\.onnx$/, `${dtype} -> ${name}`);
     }
+  });
+
+  it("maps q4f16 onto q4, because ORT has no q4f16 dynamic mode", () => {
+    // optimum/ort produce q4 for a "q4f16" request; claiming otherwise puts a
+    // filename in the manifest that nothing will ever write.
+    assert.equal(DTYPE_SUFFIX.q4f16, DTYPE_SUFFIX.q4);
   });
 
   it("returns an empty list for a missing onnx dir instead of throwing", async () => {

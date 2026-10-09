@@ -45,10 +45,14 @@ export function resolveEntryArtifacts(entry, manifestHref) {
   const gguf = rawGguf ? new URL(rawGguf, manifestHref).href : null;
   const onnx = typeof a.onnx === "string" ? a.onnx : (a.onnx?.id ?? a.onnx?.repo ?? null);
   // transformers.js picks onnx/model_<dtype>.onnx, and the dtype strings do not
-  // map 1:1 to filenames (q8 is served as model_quantized.onnx). A published
-  // ONNX tier therefore has to say which dtype it uploaded, or the loader asks
-  // for a graph that is not there.
-  const onnxDtype = typeof a.onnx === "object" ? (a.onnx?.dtype ?? null) : null;
+  // map 1:1 to filenames (q8 is served as model_quantized.onnx). A tier
+  // therefore has to say which dtype it actually has, or the loader asks for a
+  // graph that is not there. Accept both shapes: a sibling `onnxDtype` (what
+  // `wasmtune convert` writes, since it is the only step that knows what it
+  // produced) and `onnx: { id, dtype }` (what a hand-written manifest looks
+  // like).
+  const onnxDtype = (typeof a.onnx === "object" ? a.onnx?.dtype : null)
+    ?? a.onnxDtype ?? null;
   const model = a.webllm ?? null;
   let appConfig = null;
   if (a.mlc?.config && a.mlc?.lib) {
@@ -124,6 +128,10 @@ export function planFromManifest(manifest, manifestHref, overrides = {}, { hw = 
     appConfig: resolved.appConfig,
     onnx: resolved.onnx,
     onnxDtype: resolved.onnxDtype,
+    // The site name the workers were trained with. mountAssistant prefers this
+    // over its own siteName argument so the prompt the widget sends matches the
+    // prompt the fine-tune was trained on.
+    siteName: manifest?.dataset?.siteName ?? null,
     model,
     chatOpts,
     manifest,
@@ -233,7 +241,14 @@ export async function mountAssistant({
   if (allowForce) el.setAttribute("allow-force", "");
   el.appConfig = plan.appConfig;
   el.chatOptsPatch = chatOpts;
-  el.siteName = siteName;
+  // siteName has one source of truth: the manifest's dataset.siteName, which is
+  // the same string `wasmtune train` rendered into every training example. A
+  // caller passing a *different* siteName would prime the model on a prompt it
+  // never saw in training — so the manifest wins and the caller's value only
+  // fills in when the manifest does not name one.
+  const resolvedSiteName = plan.siteName ?? siteName ?? null;
+  el.siteName = resolvedSiteName;
+  if (resolvedSiteName) el.setAttribute("site-name", resolvedSiteName);
   el.baseModel = baseModel;
   el.entryId = plan.entryId;
   el.entryRequirements = plan.entryRequirements;

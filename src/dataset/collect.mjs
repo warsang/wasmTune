@@ -4,6 +4,7 @@ import { existsSync, statSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import { htmlToMarkdown } from "./markdown.mjs";
 
 export const TEXT_EXTS = new Set([".md", ".mdx", ".txt", ".html", ".htm", ".js", ".mjs", ".cjs", ".json", ".ts"]);
 export const SKIP_DIRS = new Set([
@@ -87,13 +88,15 @@ export async function collectTexts(dataDirOrDirs, { cwd = process.cwd(), maxByte
 }
 
 export function cleanText(raw, ext) {
+  const lower = ext.toLowerCase();
   let t = String(raw ?? "");
-  // Strip ESM import/export noise for .mjs/.js lesson bodies: keep template text.
-  if (ext === ".html" || ext === ".htm") {
-    t = t.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ");
-    t = t.replace(/<[^>]+>/g, " ");
+  // HTML is converted, not stripped. See src/dataset/markdown.mjs for why: one
+  // regex that removes every tag flattens the structure that carries the
+  // meaning (heading levels, code fences, tables) and keeps the boilerplate
+  // that carries none.
+  if (lower === ".html" || lower === ".htm") {
+    return htmlToMarkdown(t);
   }
-  // Unwrap JS string bodies crudely: keep printable runs.
   t = t.replace(/```/g, "\n```\n");
   t = t.replace(/[ \t]+/g, " ");
   t = t
