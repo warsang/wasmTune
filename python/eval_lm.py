@@ -22,7 +22,13 @@ def main():
     ap.add_argument("--prompts", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-tokens", type=int, default=128)
-    ap.add_argument("--temperature", type=float, default=0.0)
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="0 = greedy. Set to config.chat.temperature so this "
+                         "measures what the widget does, not a decoder nobody ships.")
+    ap.add_argument("--top-p", type=float, default=1.0)
+    ap.add_argument("--repetition-penalty", type=float, default=1.0)
+    ap.add_argument("--presence-penalty", type=float, default=0.0)
+    ap.add_argument("--frequency-penalty", type=float, default=0.0)
     # Same system prompt the widget sends. Without it the base injects its own
     # default (SmolLM2's "You are a helpful AI assistant named SmolLM..."),
     # so the gate would score the tuned model under a prompt it was never
@@ -38,6 +44,50 @@ def main():
     with open(a.out, "w") as f:
         json.dump(rows, f, indent=2)
     print(f"eval: {len(rows)} completions -> {a.out}", file=sys.stderr)
+
+
+def penalties_from(a):
+    """Presence/frequency penalties, matching scripts/onnx-eval.mjs's maths.
+
+    HF's generate() has repetition_penalty but no presence/frequency penalty, so
+    without this the fp16 eval and the ONNX eval decode differently and the
+    quantization gate compares two decoders instead of two artifacts.
+
+    Module-level class on purpose: a class defined inside a function cannot
+    close over that function's locals (class scope is skipped in method name
+    resolution), so `torch` would be a NameError at call time.
+    """
+    import torch
+
+    class Penalties:
+        def __call__(self, input_ids, scores):
+            if a.presence_penalty <= 0 and a.frequency_penalty <= 0:
+                return scores
+            seen = sorted(set(input_ids[0].tolist()))
+            idx = torch.tensor(seen, device=scores.device)
+            if a.presence_penalty > 0:
+                scores[:, idx] -= a.presence_penalty
+            if a.frequency_penalty > 0:
+                for tok in seen:
+                    n = int((input_ids[0] == tok).sum().item())
+                    scores[:, tok] -= a.frequency_penalty * n
+            return scores
+
+    return Penalties()
+
+
+def build_logits_processors(a, eos_id):
+    try:
+        import torch
+    except Exception:
+        return None
+    from transformers import RepetitionPenaltyLogitsProcessor
+    procs = []
+    if a.repetition_penalty and a.repetition_penalty != 1.0:
+        procs.append(RepetitionPenaltyLogitsProcessor(penalty=a.repetition_penalty))
+    procs.append(penalties_from(a))
+    from transformers import LogitsProcessorList
+    return LogitsProcessorList(procs)
 
 
 def apply_template(tokenizer, prompt, system_prompt=None):
@@ -101,9 +151,13 @@ def run_cuda(a, prompts):
         text = apply_template(tok, p["prompt"], a.system_prompt)
         inputs = tok(text, return_tensors="pt").to(model.device)
         with torch.no_grad():
+            processors = build_logits_processors(
+                a, tok.eos_token_id)
             gen = model.generate(**inputs, max_new_tokens=a.max_tokens,
                                  do_sample=a.temperature > 0,
                                  temperature=max(a.temperature, 1e-6),
+                                 top_p=a.top_p if a.temperature > 0 else 1.0,
+                                 logits_processor=processors,
                                  pad_token_id=tok.eos_token_id)
         out = tok.decode(gen[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
         rows.append({"id": p["id"], "output": out})

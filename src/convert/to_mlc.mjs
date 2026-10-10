@@ -185,13 +185,22 @@ export async function convertModel({
       // from a local directory: both 1.23 and 2.x raise "Cannot infer the task
       // from a local directory yet". So every ONNX export from a merged local
       // dir failed with a traceback that sounds like an optimum bug rather than
-      // a missing flag. Qwen2ForCausalLM is a text-generation task.
+      // a missing flag.
+      //
+      // It must be text-generation-WITH-PAST. "with past" means the graph takes
+      // past_key_values.* and returns present.*, so transformers.js can set
+      // useCache: true and generate one token per step. Plain text-generation
+      // produces a graph with three inputs and one output: every step
+      // recomputes the whole prefix and the widget silently loses its cache.
+      // It is also what makes torch.onnx emit a RoPE table per decoder layer,
+      // which is exactly what the dedupe step below exists to collapse - a
+      // task without past exports no per-layer tables to dedupe.
       let exportError = null;
       try {
         await execAsync(optimum, [
           "export", "onnx",
           "--model", mergedDir,
-          "--task", "text-generation",
+          "--task", "text-generation-with-past",
           out,
         ]);
       } catch (e) {

@@ -53,12 +53,19 @@ describe("onnx dedupe: convert wiring", () => {
     assert.match(bin, /venvOutDir: path\.resolve\(cwd, config\.output\.dir\)/);
   });
 
-  it("asks optimum for an explicit task", () => {
+  it("asks optimum for an explicit task, and it is the with-past one", () => {
     // optimum infers the task from a model *id*, not a local directory: both
     // 1.23 and 2.x raise "Cannot infer the task from a local directory yet".
     // Without --task every ONNX export of merged local weights failed.
+    //
+    // It has to be text-generation-with-past. Plain text-production builds a
+    // graph with three inputs and one output, so transformers.js cannot use the
+    // KV cache and every token recomputes the whole prefix. It is also what
+    // makes torch.onnx emit a RoPE table per layer, which is the only reason
+    // the dedupe step below has anything to merge.
     const s = src();
-    assert.match(s, /"--task",\s*"text-generation"/);
+    assert.match(s, /"--task",\s*"text-generation-with-past"/);
+    assert.doesNotMatch(s, /"--task",\s*"text-generation"\s*,/);
   });
 
   it("verifies the export artifact instead of trusting optimum's exit code", () => {

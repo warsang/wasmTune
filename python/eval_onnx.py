@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+from collections import Counter
 
 # The dtype names transformers.js asks for do not map 1:1 to filenames.
 DTYPE_FILE = {
@@ -28,6 +29,14 @@ def main():
     ap.add_argument("--out", required=True, help="JSON [{id, output_ids}]")
     ap.add_argument("--dtype", default="q8")
     ap.add_argument("--max-tokens", type=int, default=64)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="0 = greedy. Must match the widget's chat block, or the "
+                         "gate measures the decoder instead of the artifact.")
+    ap.add_argument("--top-p", type=float, default=1.0)
+    ap.add_argument("--repetition-penalty", type=float, default=1.0)
+    ap.add_argument("--presence-penalty", type=float, default=0.0)
+    ap.add_argument("--frequency-penalty", type=float, default=0.0)
     a = ap.parse_args()
 
     try:
@@ -79,6 +88,43 @@ def main():
           f"({os.path.getsize(graph)/1e6:.1f} MB)", file=sys.stderr)
 
     eos = int(os.environ.get("EVAL_ONNX_EOS", "-1"))
+    rng = np.random.default_rng(a.seed)
+
+    def softmax(x):
+        x = x - np.max(x)
+        e = np.exp(x)
+        return e / np.sum(e)
+
+    # Sampling that matches the widget's `chat` block, because greedy decoding
+    # is not what a visitor experiences and it is far more loop-prone: measured
+    # on the same model, greedy produced repetition loops that the sampled
+    # settings never did. A gate that decodes differently from the thing it is
+    # gating measures the decoder, not the artifact.
+    def next_token(logits, generated):
+        if a.temperature <= 0:
+            return int(np.argmax(logits))
+        logits = np.array(logits, dtype=np.float64).ravel()
+        if generated:
+            seen = list(set(generated))
+            logits[seen] -= a.presence_penalty
+            for tok, count in Counter(generated).items():
+                logits[tok] -= a.frequency_penalty * count
+            logits[seen] = np.where(
+                logits[seen] > 0, logits[seen] / a.repetition_penalty,
+                logits[seen] * a.repetition_penalty)
+        logits = logits / a.temperature
+        if a.top_p < 1.0:
+            probs = softmax(logits)
+            order = np.argsort(probs)[::-1]
+            keep = np.cumsum(probs[order]) <= a.top_p
+            keep[0] = True
+            mask = np.zeros(probs.shape, dtype=bool)
+            mask[order[keep]] = True
+            probs = softmax(np.where(mask, logits, -np.inf))
+        else:
+            probs = softmax(logits)
+        return int(rng.choice(probs.shape[0], p=probs))
+
     out = []
     for case in cases:
         ids = list(case["input_ids"])
@@ -104,7 +150,7 @@ def main():
                         dims[2] = 0                      # empty past
                     feed[name] = ort.OrtValue.ortvalue_from_numpy(np.zeros(dims, dtype=dtype_of(meta)))
             logits = sess.run(["logits"], feed)[0]
-            next_id = int(np.argmax(logits[0, -1]))
+            next_id = next_token(logits[0, -1], generated)
             if eos >= 0 and next_id == eos:
                 break
             ids.append(next_id)

@@ -38,12 +38,24 @@ const MAX_TOKENS = Number(get("max-tokens", 64));
 const SYSTEM_PROMPT = get("system-prompt", null) || null;
 const PYTHON = get("python", "python3");
 const TOKENIZER_DIR = get("tokenizer-dir", null);
+// Decoding settings, forwarded verbatim to python so the ONNX eval decodes the
+// way the widget does. Without them the gate decodes greedily while the browser
+// samples with a repetition penalty, and greedy is far more loop-prone — so the
+// gate ends up measuring the decoder instead of the artifact.
+const TEMPERATURE = Number(get("temperature", 0));
+const TOP_P = Number(get("top-p", 1));
+const REPETITION_PENALTY = Number(get("repetition-penalty", 1));
+const PRESENCE_PENALTY = Number(get("presence-penalty", 0));
+const FREQUENCY_PENALTY = Number(get("frequency-penalty", 0));
+const SEED = Number(get("seed", 42));
 
 const DTYPE_FILE = { q4: "model_q4.onnx", q4f16: "model_q4.onnx", q8: "model_quantized.onnx", fp32: "model.onnx" };
 const graphPath = path.join(ONNX_DIR, DTYPE_FILE[DTYPE] ?? DTYPE_FILE.q8);
 if (!existsSync(graphPath)) {
   console.error(`onnx-eval: ${graphPath} not present — run \`wasmtune convert\` first`);
-  process.exit(0);
+  // Non-zero on purpose: the caller must not read exit 0 as "this artifact is
+  // fine". A gate that cannot run has to fail, not pass silently.
+  process.exit(2);
 }
 
 function existsSync(p) {
@@ -53,8 +65,20 @@ function existsSync(p) {
 // The tokenizer directory: convert leaves it beside onnx/, produced by export.py.
 function findTokenizerDir() {
   if (TOKENIZER_DIR) return TOKENIZER_DIR;
+  // convert writes only the graph into onnx/. The tokenizer is shipped by
+  // export.py into the training run's merged/ dir, which is a sibling of the
+  // graph, not inside it — so searching only ONNX_DIR never finds it, and
+  // every eval-onnx run used to no-op with exit 0.
   const root = path.dirname(ONNX_DIR);
-  for (const c of [ONNX_DIR, root, path.join(root, "merged"), path.join(root, "fp16")]) {
+  const cands = [ONNX_DIR, root];
+  for (const base of [root, path.dirname(root), path.dirname(path.dirname(root))]) {
+    cands.push(
+      path.join(base, "merged"),
+      path.join(base, "run", "merged"),
+      path.join(base, "fp16"),
+    );
+  }
+  for (const c of cands) {
     if (existsSync(path.join(c, "tokenizer.json"))) return c;
   }
   return null;
@@ -65,8 +89,11 @@ const prompts = readFileSync(PROMPTS, "utf8").split("\n").filter(Boolean).map((l
 const run = async () => {
   const tokDir = findTokenizerDir();
   if (!tokDir) {
-    console.error(`onnx-eval: no tokenizer.json found next to ${ONNX_DIR}; pass --tokenizer-dir`);
-    process.exit(0);
+    console.error(
+      `onnx-eval: no tokenizer.json found near ${ONNX_DIR}. That directory holds
+only the graph; the tokenizer lives in the merged/ dir of the training run.
+Pass --tokenizer-dir <merged dir>.`);
+    process.exit(2);
   }
 
   // transformers.js reads the chat template from tokenizer_config.json and
@@ -112,6 +139,12 @@ const run = async () => {
     "--out", `${OUT}.completions.json`,
     "--dtype", DTYPE,
     "--max-tokens", String(MAX_TOKENS),
+    "--temperature", String(TEMPERATURE),
+    "--top-p", String(TOP_P),
+    "--repetition-penalty", String(REPETITION_PENALTY),
+    "--presence-penalty", String(PRESENCE_PENALTY),
+    "--frequency-penalty", String(FREQUENCY_PENALTY),
+    "--seed", String(SEED),
   ], { env: { ...process.env, EVAL_ONNX_EOS: String(tok.eos_token_id ?? -1) } });
 
   const completions = JSON.parse(readFileSync(`${OUT}.completions.json`, "utf8"));

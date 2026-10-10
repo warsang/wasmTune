@@ -4,14 +4,27 @@
 // Zero runtime deps; Python/torch live behind the auto-venv in train/.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 
 const execFileAsync = promisify(execFile);
+
+// Run node with an argv array and no shell. execFile is wrong for this on
+// Windows: it concatenates argv into one command line without quoting, so any
+// argument containing a space (every --system-prompt) gets split and the child
+// dies with an error that looks like a bug in the script.
+function spawnNode(args, { cwd = process.cwd() } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, { cwd, stdio: "inherit" });
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`node ${args[0]} exited ${code}`)));
+  });
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, "..");
@@ -48,7 +61,7 @@ Commands:
   dataset [--config <path>] [--synth provider:model]
   train [--config <path>] [--allow-large] [--backend auto|unsloth|mlx] [--max-steps N] [--dry-run] [--python <bin>]
   eval [--config <path>] [--backend auto|unsloth|mlx] [--max-prompts N] [--max-tokens N] [--skip-tuned] [--judge provider:model] [--python <bin>]
-  eval-onnx [--config <path>] [--dtype q4|q8] [--max-tokens N] [--python <bin>] [--force]
+  eval-onnx [--config <path>] [--dtype q4|q8] [--max-tokens N] [--python <bin>] [--onnx-dir <dir>] [--tokenizer-dir <dir>] [--force]
   convert [--config <path>]
   publish [--config <path>] --repo <user>/<name> [--token <hf-token>] [--private]
   serve [--config <path>] [--port N]
@@ -97,6 +110,7 @@ function parse(argv) {
     else if (flag === "--judge") out.opts.judge = take();
     else if (flag === "--python") out.opts.python = take();
     else if (flag === "--onnx-dir") out.opts.onnxDir = take();
+    else if (flag === "--tokenizer-dir") out.opts.tokenizerDir = take();
     else if (flag === "--force") out.opts.force = true;
     else if (flag === "--allow-large" || flag === "--dry-run" || flag === "--skip-tuned" || flag === "--skip-serve") out.opts[flag.slice(2)] = true;
     else if (a === "--help" || a === "-h") {
@@ -287,7 +301,11 @@ async function cmdEval(opts, cwd) {
       cwd,
       backend,
       maxPrompts: opts.maxPrompts ?? 50,
-      maxTokens: opts.maxTokens ?? 128,
+      // Must match what eval-onnx uses (and what the widget ships), or the
+      // quantization gate compares a 128-token fp16 baseline against a
+      // 96-token artifact. Longer answers score higher on keyword recall, so
+      // that asymmetry alone can move the delta by more than the threshold.
+      maxTokens: opts.maxTokens ?? sub.chat?.maxTokens ?? 96,
       skipTuned: !!opts["skip-tuned"],
       judge: opts.judge ?? null,
       python: opts.python ?? "python3",
@@ -646,6 +664,25 @@ async function cmdEvalOnnx(opts, cwd) {
       " or " + shared +
       " — run `wasmtune eval` first (it builds the same holdout the training " +
       "gate used, so the two numbers are comparable)");
+    process.exitCode = 2;
+    return;
+  }
+
+  // The tokenizer is NOT beside the graph: convert emits only the graph into
+  // onnx/, and export.py puts the tokenizer in the training run's merged/ dir.
+  // Point at it explicitly rather than letting the script search, because the
+  // search previously found nothing and exit 0 made that look like success.
+  const tokenizerDir = opts.tokenizerDir
+    ? path.resolve(cwd, opts.tokenizerDir)
+    : [perTier, shared]
+        .map((d) => path.join(d, "run", "merged"))
+        .find((d) => existsSync(path.join(d, "tokenizer.json"))) ?? null;
+  if (!tokenizerDir) {
+    console.error(
+      "[wasmtune] eval-onnx skipped: no tokenizer.json in a merged/ dir under " +
+      perTier + " or " + shared + " — run `wasmtune convert` first, or pass " +
+      "--tokenizer-dir");
+    process.exitCode = 2;
     return;
   }
 
@@ -653,7 +690,12 @@ async function cmdEvalOnnx(opts, cwd) {
     .defaultSystemPrompt(config.dataset?.siteName ?? path.basename(config.dataDir));
 
   console.error("[wasmtune] evaluating the quantized artifact that the widget loads");
-  await execFileAsync("node", [
+  // spawn, not execFile: on Windows execFile joins argv into a command line
+  // without quoting, and --system-prompt always contains spaces and an
+  // apostrophe. The mangled line made the child die with
+  // "readFileSync is not defined", which reads like a bug in the script rather
+  // than in how it was invoked.
+  await spawnNode([
     "scripts/onnx-eval.mjs",
     "--onnx-dir", graphDir,
     "--prompts", promptsPath,
@@ -662,6 +704,16 @@ async function cmdEvalOnnx(opts, cwd) {
     "--max-tokens", String(opts.maxTokens ?? 96),
     "--system-prompt", systemPrompt,
     "--python", opts.python ?? "python3",
+    "--tokenizer-dir", tokenizerDir,
+    // Decode the way the widget decodes. These used to be absent, so the ONNX
+    // eval decoded greedily while the browser samples with a repetition
+    // penalty — greedy is far more loop-prone, so the gate was measuring the
+    // decoder rather than the artifact it claims to score.
+    "--temperature", String(config.chat?.temperature ?? 0.3),
+    "--top-p", String(config.chat?.topP ?? 1.0),
+    "--repetition-penalty", String(config.chat?.repetitionPenalty ?? 1.0),
+    "--presence-penalty", String(config.chat?.presencePenalty ?? 0.0),
+    "--frequency-penalty", String(config.chat?.frequencyPenalty ?? 0.0),
   ], { cwd: process.cwd() });
 
   // Regression gate: compare against the fp16 eval the model was trained against.
@@ -676,16 +728,31 @@ async function cmdEvalOnnx(opts, cwd) {
   const drop = (a, b) => (a == null || b == null ? 0 : Number(a) - Number(b));
   const avgDrop = drop(fp16.avg, onnx.avg);
   const THRESHOLD = Number(process.env.WASMTUNE_QUANT_DROP ?? 0.1);
+  // Quantization's characteristic failure is not a lower average, it is
+  // degenerate output: the graph starts repeating a token forever. A model can
+  // lose only 0.08 of average and still loop on 1 prompt in 9, which is a
+  // visible failure in a chat widget and invisible to the average check.
+  const loopDelta = Number(onnx.looped ?? 0) - Number(fp16.looped ?? 0);
   console.error(
     `[wasmtune] quantization cost: avg ${(fp16.avg ?? 0).toFixed(3)} -> ${(onnx.avg ?? 0).toFixed(3)}` +
     ` (${avgDrop >= 0 ? "-" : "+"}${Math.abs(avgDrop).toFixed(3)}),` +
-    ` faithful ${(fp16.faithfulness ?? 0).toFixed(3)} -> ${(onnx.faithfulness ?? 0).toFixed(3)}`);
+    ` faithful ${(fp16.faithfulness ?? 0).toFixed(3)} -> ${(onnx.faithfulness ?? 0).toFixed(3)},` +
+    ` looped ${fp16.looped ?? 0} -> ${onnx.looped ?? 0}`);
 
   if (avgDrop > THRESHOLD && !opts.force) {
     console.error(
       `[wasmtune] eval-onnx FAILED: the shipped q8 artifact scores ${avgDrop.toFixed(3)} below the\n` +
-      `  fp16 weights it was quantized from. Publish anyway with --force, or raise\n` +
-      `  WASMTUNE_QUANT_DROP (currently ${THRESHOLD}) if this loss is expected for the model.`);
+      `  fp16 weights it was quantized from (threshold ${THRESHOLD}). Publish anyway\n` +
+      `  with --force, or raise WASMTUNE_QUANT_DROP if this loss is expected.`);
+    process.exitCode = 1;
+  }
+
+  if (loopDelta > 0 && !opts.force) {
+    console.error(
+      `[wasmtune] eval-onnx FAILED: the quantized artifact loops on ${onnx.looped} prompt(s)\n` +
+      `  where the fp16 weights looped on ${fp16.looped ?? 0}. A repetition loop is the\n` +
+      `  failure mode quantization is known for, and no average-score check sees it.\n` +
+      `  Publish anyway with --force.`);
     process.exitCode = 1;
   }
 }

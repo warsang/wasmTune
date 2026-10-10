@@ -203,9 +203,37 @@ export function writeOnnxManifestEntry({
   // The site name the weights were trained with, so the widget's prompt matches.
   if (siteName) manifest.dataset = { ...(manifest.dataset ?? {}), siteName };
 
-  const at = manifest.models.findIndex((m) => m.id === entry.id || m?.artifacts?.onnx === repoId);
+  const at = manifest.models.findIndex((m) => {
+    if (m.id === entry.id) return true;
+    // A tier's ONNX repo is written as a bare string by this function but as
+    // { id, dtype } by a hand-written manifest (which is what the ships one
+    // is). Comparing only the string form made publish fall through to
+    // unshift() and add a second tier for the same repo, leaving the old entry
+    // - with its stale label and requirements - still in the ladder.
+    const onnx = m?.artifacts?.onnx;
+    const repo = typeof onnx === "string" ? onnx : (onnx?.id ?? onnx?.repo ?? null);
+    return repo === repoId;
+  });
   if (at === -1) manifest.models.unshift(entry);
-  else manifest.models[at] = { ...manifest.models[at], ...entry }; // update in place
+  else {
+    // Merge so the hand-curated identity of the tier (its id, label,
+    // requirements and chat) survives a publish, while the repo, dtype and
+    // site name come from this run. Order matters: existing wins for identity,
+    // and artifacts is rebuilt explicitly below.
+    const existing = manifest.models[at];
+    const existingOnnx = existing?.artifacts?.onnx;
+    const nested = typeof existingOnnx === "object" && existingOnnx !== null;
+    manifest.models[at] = {
+      ...entry,
+      ...existing,
+      artifacts: {
+        ...existing.artifacts,
+        onnx: nested
+          ? { ...existingOnnx, id: repoId, ...(dtype ? { dtype } : {}) }
+          : repoId,
+      },
+    };
+  }
 
   manifest.created = new Date().toISOString();
   mkdirSync(path.dirname(target), { recursive: true });

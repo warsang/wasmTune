@@ -115,6 +115,20 @@ export async function runEval(config, { cwd = process.cwd(), backend = "mlx", ma
       (await import("../chat/options.mjs")).defaultSystemPrompt(
         config.dataset?.siteName ?? path.basename(path.resolve(cwd, config.dataDir))));
     if (adapters) args.push("--adapters", adapters);
+    // Decode the way the widget does. This used to call eval_lm.py with no
+    // decoding flags, so it defaulted to greedy while the browser samples with a
+    // repetition penalty. Greedy is far more loop-prone, and `eval-onnx` scores
+    // the artifact with the widget's settings — so the gate was comparing a
+    // greedy fp16 baseline against a sampled artifact and attributing the
+    // difference to quantization.
+    const chat = config.chat ?? {};
+    args.push(
+      "--temperature", String(chat.temperature ?? 0.3),
+      "--top-p", String(chat.topP ?? 1.0),
+      "--repetition-penalty", String(chat.repetitionPenalty ?? 1.0),
+      "--presence-penalty", String(chat.presencePenalty ?? 0.0),
+      "--frequency-penalty", String(chat.frequencyPenalty ?? 0.0),
+    );
     await runPython({ outDir, script: "python/eval_lm.py", args, cwd });
     return JSON.parse(await readFile(outPath, "utf8"));
   };
