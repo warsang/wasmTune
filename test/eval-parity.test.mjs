@@ -120,6 +120,26 @@ describe("wasmtune eval: same decoding and budget as the artifact's gate", () =>
   });
 });
 
+describe("publish: finds what convert actually wrote", () => {
+  it("looks for graphs in webDir first, not output.dir", () => {
+    // convert writes to webDir/<slug>/onnx. publish looked at
+    // output.dir/<slug>/onnx, which never exists, so every publish printed
+    // "no onnx/ graphs" and silently published nothing.
+    const s = read("bin/wasmtune.mjs");
+    assert.match(s, /config\.output\.webDir, multi \? slug : "\."/);
+    assert.match(s, /\.find\(\(d\) => graphsIn\(d\)\.length\)/);
+  });
+
+  it("finds the tokenizer in run/merged, not merged", () => {
+    // export.py writes <output.dir>/<slug>/run/merged. The single hard-coded
+    // "<output.dir>/<slug>/merged" path uploaded no tokenizer at all, so the
+    // graph landed on the Hub with nothing to decode with.
+    const s = read("bin/wasmtune.mjs");
+    assert.match(s, /path\.join\(finetuneRoot, "run", "merged"\)/);
+    assert.match(s, /find\(\(d\) => existsSync\(path\.join\(d, "tokenizer\.json"\)\)\)/);
+  });
+});
+
 describe("eval_lm.py: presence/frequency penalties", () => {
   it("does not rely on a closure over a function-local import", () => {
     // A class defined inside a function cannot see that function's locals:

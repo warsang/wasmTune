@@ -45,7 +45,7 @@ npx wasmtune train   --dataDir ./docs --model Qwen/Qwen2.5-1.5B-Instruct --epoch
 npx wasmtune eval    # gate: the tuned model must beat the base, or the build fails
 npx wasmtune convert # merged weights -> GGUF + MLC (q4f16_1) + ONNX + manifest
 npx wasmtune eval-onnx   # scores the artifact that ships, not the fp16 weights
-HF_TOKEN=hf_… npx wasmtune publish   # optional: upload to the Hub + manifest entry
+HF_TOKEN=<your-hf-token> npx wasmtune publish   # optional: upload to the Hub + manifest entry
 ```
 
 ```html
@@ -101,7 +101,7 @@ wasmtune train      # SFT / DPO / ORPO / GRPO, LoRA
 wasmtune eval       # held-out prompts, base vs tuned; non-zero exit on regression
 wasmtune convert    # merged weights -> GGUF + MLC + ONNX, one manifest, quantized
 wasmtune eval-onnx  # scores the artifact that ships — the gate that matters
-HF_TOKEN=… wasmtune publish   # upload to the Hub + write the manifest entry
+HF_TOKEN=<your-hf-token> npx wasmtune publish   # optional: upload to the Hub + manifest entry
 ```
 
 1. `wasmtune dataset` — crawl `dataDir` into a QA-heavy training set. HTML is
@@ -310,6 +310,58 @@ confident filler. Treat a passing gate as *"training moved the model"*, not
 0.5B model you need a real corpus, not a smoke test, before shipping answers
 to anyone.
 
+## Eval decodes like the widget, or it measures the decoder
+
+`eval` and `eval-onnx` both take the decoding parameters from `config.chat`
+(temperature, top-p, repetition/presence/frequency penalties) and the token
+budget from `chat.maxTokens`. This is load-bearing for the quantization gate:
+it compares an artifact against the fp16 weights it was quantized from, so if
+the two halves decode differently the delta measures the decoders rather than
+quantization.
+
+That is not hypothetical. `eval-onnx` used to decode greedily — the flags were
+never forwarded from the wrapper script — while the browser samples with a
+repetition penalty. Greedy is much more loop-prone, and the gate dutifully
+reported *"the quantized artifact loops on 4 prompts"* that the artifact, under
+its own decoding settings, does not loop on at all. It also used to generate 96
+tokens while `eval` generated 128, and longer answers score higher on keyword
+recall, so that asymmetry alone could move the delta past the threshold.
+
+Measured on this repo's corpus, both halves on the same 39 holdout prompts,
+same decoding, same 96-token budget:
+
+```
+  fp16     avg=0.135  faith=0.215  looped=0
+  q8       avg=0.098  faith=0.435  looped=0
+  quantization cost: avg -0.037, faithfulness +0.220, loops +0
+```
+
+The gate fails on an average drop over `WASMTUNE_QUANT_DROP` (default 0.1), or
+on any repetition loop the fp16 weights did not have — that failure mode is the
+one quantization is known for and no average check sees it.
+
+## The published tier, and what it actually does
+
+The demo's tuned tier at [warsang/lumen-assistant-qwen2.5-0.5b](https://huggingface.co/warsang/lumen-assistant-qwen2.5-0.5b)
+is 516.8 MB, sha256 `a7e7d42aa7d16ed6db5172401968a3b9ed250375ea627187a68bd5bf60cd3451`,
+a single self-contained `onnx/model_quantized.onnx` — no external weights to
+fetch. It was exported with `--task text-generation-with-past`, so the graph
+takes `past_key_values.*` and returns `present.*`; a plain `text-generation`
+export produces a three-input graph where every token recomputes the whole
+prefix and the widget silently loses its cache.
+
+What it will and will not do, measured rather than implied:
+
+| | before retrain | after retrain |
+|---|---|---|
+| completions confidently naming an **unrelated vendor** | 11/44 | **0/44** |
+| completions carrying a real corpus term | 2/44 | 1/44 |
+| faithfulness (fp16) | 0.238 | 0.46 |
+
+The retrain fixed the format mismatch and removed the confidently-wrong output.
+It did **not** make the model answer questions about the corpus: it still does
+not, and on 51 pairs it will not. The tier stays labelled a smoke test.
+
 ## Model tiers & hardware detection
 
 Fine-tuning and serving are different hardware problems: the machine that
@@ -503,7 +555,7 @@ await mountAssistant({ target: "#chat", workerUrl: "/worker.js" });
 `eval-onnx` — scores the **quantized** ONNX graph the widget will load, using the same tokenizer and scorer the browser uses. Drops more than `WASMTUNE_QUANT_DROP` (default 0.1) below the fp16 `eval` score ⇒ non-zero exit. Override with `--force` when you accept the loss, `--quant-drop 0.05` to tighten.
 `serve` — static preview server for the chat widget + converted model.
 `build` — one-shot dataset → train → eval → convert. The eval gate throws on regression, so a bad model fails the build instead of shipping. Retraining is nondeterministic, so `build` never publishes — that stays a separate command.
-`publish` — upload converted artifacts to the Hugging Face Hub, verify the sha256 of what landed matches the file on disk, and write the manifest entry itself. Needs `HF_TOKEN`. Destructive nowhere: re-running re-uploads the same bytes.
+`publish` — upload converted artifacts to the Hugging Face Hub, verify the sha256 of what landed matches the file on disk, and write the manifest entry itself. Needs `HF_TOKEN`. Destructive nowhere: re-running re-uploads the same bytes. The graph goes to `<repo>/onnx/<dtype>` — no per-slug prefix, because that is the path transformers.js resolves from `artifacts.onnx.id`. Uploads stream through `huggingface_hub` from the training venv (`python/hf_upload.py`), so `optimum[onnxruntime]` must be installed; `HF_HUB_DISABLE_XET=1` forces plain LFS where the Xet backend is unreachable. The model card is written to `.finetune/model-card/README.md` and uploaded, never over your repo's README.
 
 Every command is also a plain function import (`import { dataset, train, eval as evaluate } from "wasmtune"`) if you want it inside a script rather than the CLI.
 

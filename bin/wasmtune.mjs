@@ -111,6 +111,8 @@ function parse(argv) {
     else if (flag === "--python") out.opts.python = take();
     else if (flag === "--onnx-dir") out.opts.onnxDir = take();
     else if (flag === "--tokenizer-dir") out.opts.tokenizerDir = take();
+    else if (flag === "--repo") out.opts.repo = take();
+    else if (flag === "--private") out.opts.private = true;
     else if (flag === "--force") out.opts.force = true;
     else if (flag === "--allow-large" || flag === "--dry-run" || flag === "--skip-tuned" || flag === "--skip-serve") out.opts[flag.slice(2)] = true;
     else if (a === "--help" || a === "-h") {
@@ -505,21 +507,43 @@ async function cmdPublish(opts, cwd) {
   let publishedDtype = null;
   const skipped = [];
 
+  // Hoisted out of the loop below: the model-card upload after the loop needs
+  // the same venv root, and a loop-scoped const there was a ReferenceError that
+  // threw *after* the graph had already uploaded and verified.
+  const finetuneRoot = trained.length
+    ? path.resolve(cwd, entryConfig(config, trained[0], multi).relOut)
+    : path.resolve(cwd, config.output.dir);
+
   for (const entry of trained) {
     const slug = slugifyModel(entry.model);
     const { relOut } = entryConfig(config, entry, multi);
-    const onnxDir = path.join(path.resolve(cwd, relOut), "onnx");
-    const graphs = graphsIn(onnxDir);
+    // convert writes the graphs into webDir/<slug>/onnx (the web output dir),
+    // not into output.dir/<slug>/onnx. Looking only in the latter made publish
+    // report "no onnx/ graphs" and skip the tier silently. Accept the place
+    // convert actually writes first, then the older layouts.
+    const onnxDir = [
+      path.resolve(cwd, config.output.webDir, multi ? slug : ".", "onnx"),
+      path.join(finetuneRoot, "onnx"),
+      path.join(finetuneRoot, "run", "onnx"),
+      path.resolve(cwd, config.output.webDir, "onnx"),
+    ].find((d) => graphsIn(d).length) ?? null;
+    const graphs = onnxDir ? graphsIn(onnxDir) : [];
     if (!graphs.length) {
-      skipped.push(`${slug}: no onnx/ graphs at ${onnxDir} — run \`wasmtune convert\` with optimum-cli installed`);
+      skipped.push(`${slug}: no onnx/ graphs under ${config.output.webDir} or ${finetuneRoot} — run \`wasmtune convert\` with optimum-cli installed`);
       continue;
     }
     // Smallest first: it is the one transformers.js will fetch on a phone.
     const chosen = graphs[0];
     publishedDtype = chosen.dtype;
-    console.error(`[wasmtune] ${slug}: ${chosen.file} (${(chosen.bytes / 1e6).toFixed(1)} MB, dtype ${chosen.dtype})`);
+    console.error(`[wasmtune] ${slug}: ${chosen.file} (${(chosen.bytes / 1e6).toFixed(1)} MB, dtype ${chosen.dtype}) from ${onnxDir}`);
 
-    const sub = multi ? `${slug}/` : "";
+    // No per-slug subdirectory. A publish repo holds ONE model, and the widget
+    // loads it as <repo>/onnx/<dtype file> - transformers.js resolves that path
+    // from the manifest's artifacts.onnx.id with no slug in it. Prefixing the
+    // slug here put the graph at <repo>/<slug>/onnx/..., which the manifest
+    // does not point at, so the demo kept loading the stale file while publish
+    // reported a successful, sha256-verified upload of the new one.
+    const sub = "";
     const graphPath = path.join(onnxDir, chosen.file);
     const graphSha = sha256File(graphPath);
 
@@ -531,19 +555,27 @@ async function cmdPublish(opts, cwd) {
         console.error(`[wasmtune] WARNING: graph references ${ref} but it is not in ${onnxDir}`);
         continue;
       }
-      await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}onnx/${ref}` });
+      await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}onnx/${ref}`, outDir: finetuneRoot });
       uploaded++;
     }
-    await uploadFile({ repoId, token, localPath: graphPath, pathInRepo: `${sub}onnx/${chosen.file}` });
+    await uploadFile({ repoId, token, localPath: graphPath, pathInRepo: `${sub}onnx/${chosen.file}`, outDir: finetuneRoot });
     uploaded++;
 
-    // The graph is useless without its tokenizer.
-    const mergedDir = path.join(path.resolve(cwd, relOut), "merged");
+    // The graph is useless without its tokenizer. export.py puts the tokenizer
+    // in <output.dir>/<slug>/run/merged, not <output.dir>/<slug>/merged, so the
+    // single hard-coded path silently uploaded no tokenizer at all - the graph
+    // landed with nothing to decode with.
+    const mergedDir = [
+      path.join(finetuneRoot, "run", "merged"),
+      path.join(finetuneRoot, "merged"),
+      path.resolve(cwd, config.output.dir, "merged"),
+    ].find((d) => existsSync(path.join(d, "tokenizer.json")))
+      ?? path.join(finetuneRoot, "run", "merged");
     for (const f of ["config.json", "generation_config.json", "tokenizer.json",
                      "special_tokens_map.json", "vocab.json", "merges.txt"]) {
       const local = path.join(mergedDir, f);
       if (existsSync(local)) {
-        await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}${f}` });
+        await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}${f}`, outDir: finetuneRoot });
         uploaded++;
       }
     }
@@ -551,7 +583,7 @@ async function cmdPublish(opts, cwd) {
     // ignores the sibling .jinja, so the inlined copy wins and goes last.
     const inlined = inlineChatTemplate({ dir: mergedDir });
     if (inlined) {
-      await uploadFile({ repoId, token, localPath: inlined, pathInRepo: `${sub}tokenizer_config.json` });
+      await uploadFile({ repoId, token, localPath: inlined, pathInRepo: `${sub}tokenizer_config.json`, outDir: finetuneRoot });
       uploaded++;
       console.error(`[wasmtune] ${slug}: inlined chat_template into tokenizer_config.json`);
     }
@@ -584,7 +616,7 @@ async function cmdPublish(opts, cwd) {
     evalReport: readEvalReport(cwd, config, multi, trained[0]),
   }).catch(() => null);
   if (card) {
-    await uploadFile({ repoId, token, localPath: card, pathInRepo: "README.md" });
+    await uploadFile({ repoId, token, localPath: card, pathInRepo: "README.md", outDir: finetuneRoot });
     uploaded++;
   }
 

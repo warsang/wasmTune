@@ -8,12 +8,34 @@
 // remote and needs a credential.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_ENDPOINT = "https://huggingface.co";
 const HUB_TIMEOUT_MS = 30 * 60 * 1000;
+
+const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// huggingface_hub lives in the venv the trainer bootstraps, so `convert` and
+// `publish` agree on which interpreter runs. The venv sits at the root of the
+// configured output dir, not beside every per-tier subdir, so walk up.
+function venvPython(outDir) {
+  if (!outDir) return null;
+  const bin = process.platform === "win32" ? "Scripts" : "bin";
+  const exe = process.platform === "win32" ? "python.exe" : "python";
+  let dir = path.resolve(outDir);
+  for (;;) {
+    const candidate = path.join(dir, ".finetune-venv", bin, exe);
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
 
 export function tokenFor(explicit = null, env = process.env) {
   return explicit ?? env.HF_TOKEN ?? env.HUGGING_FACE_HUB_TOKEN ?? null;
@@ -43,9 +65,27 @@ export function graphsIn(onnxDir) {
   for (const [dtype, file] of Object.entries(DTYPE_SUFFIX)) {
     if (seen.has(file) || !files.includes(file)) continue;
     seen.add(file);
-    found.push({ dtype, file, bytes: statSync(path.join(onnxDir, file)).size });
+    const abs = path.join(onnxDir, file);
+    // A graph is only publishable if its external weights are beside it.
+    // model.onnx is a 4 MB stub whose 4 GB live in model.onnx_data, so sorting
+    // by size alone made publish pick the fp32 stub - a graph that 404s the
+    // moment anything loads it. Score by total bytes actually present.
+    const total = statSync(abs).size + externalDataRefs(abs)
+      .filter((ref) => files.includes(ref))
+      .reduce((sum, ref) => sum + statSync(path.join(onnxDir, ref)).size, 0);
+    found.push({ dtype, file, bytes: statSync(abs).size, totalBytes: total, selfContained: total === statSync(abs).size });
   }
-  return found.sort((a, b) => a.bytes - b.bytes);
+  // Rank by the dtype a browser can actually fetch, then by real size. A
+  // self-contained quantized graph beats a stub whose weights are elsewhere,
+  // and among equals the smaller total wins - that is the one a phone downloads.
+  const dtypeRank = { q8: 0, q4: 1, q4f16: 2, int8: 3, uint8: 4, fp16: 5, fp32: 6 };
+  return found.sort((a, b) => {
+    if (a.selfContained !== b.selfContained) return a.selfContained ? -1 : 1;
+    if (a.dtype !== b.dtype) {
+      return (dtypeRank[a.dtype] ?? 99) - (dtypeRank[b.dtype] ?? 99);
+    }
+    return a.totalBytes - b.totalBytes;
+  });
 }
 
 // External-data references travel with the graph. Collected from the protobuf
@@ -88,25 +128,33 @@ export async function ensureRepo({ repoId, token, endpoint = DEFAULT_ENDPOINT, p
   throw new Error(`create repo failed (HTTP ${res.status}): ${body.slice(0, 300)}`);
 }
 
-/** Upload one file, letting the git-LFS path handle anything large. */
-export async function uploadFile({ repoId, token, localPath, pathInRepo, endpoint = DEFAULT_ENDPOINT }) {
-  const bytes = statSync(localPath).size;
-  const res = await hubFetch(
-    `${endpoint}/api/models/${repoId}/upload/main/${encodeURIComponent(pathInRepo).replace(/%2F/g, "/")}`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "content-type": "application/octet-stream",
-        "x-lfs-size": String(bytes),
-      },
-      body: readFileSync(localPath),
-    },
-  );
-  if (!res.ok) {
-    throw new Error(`upload ${pathInRepo} failed (HTTP ${res.status}): ${(await res.text()).slice(0, 200)}`);
+/** Upload one file to the Hub, streaming through huggingface_hub. */
+export async function uploadFile({
+  repoId, token, localPath, pathInRepo, summary = null,
+  endpoint = DEFAULT_ENDPOINT, outDir = null, python = null,
+}) {
+  if (!existsSync(localPath)) {
+    throw new Error(`upload ${pathInRepo} failed: ${localPath} does not exist`);
   }
-  return { pathInRepo, bytes };
+  // The venv python: huggingface_hub lives there (optimum depends on it).
+  const venvPy = venvPython(outDir);
+  const py = python ?? (venvPy && existsSync(venvPy) ? venvPy
+    : (existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3"));
+  const script = path.join(PKG_ROOT, "python", "hf_upload.py");
+  const child = spawn(py, [
+    script,
+    "--file", localPath,
+    "--repo", repoId,
+    "--path-in-repo", pathInRepo,
+    "--token", token ?? "",
+    "--commit-message", summary ?? `wasmtune: publish ${pathInRepo}`,
+  ], { stdio: ["ignore", "ignore", "inherit"] });
+  await new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`upload ${pathInRepo} failed (python exit ${code})`)));
+  });
+  return { pathInRepo, bytes: statSync(localPath).size };
 }
 
 /**
@@ -282,7 +330,14 @@ export async function writeModelCard({ dir, siteName, baseModel, dtype, repoId =
       "",
     );
   }
-  const out = path.join(dir, "README.md");
+  // NOT <cwd>/README.md. publish used to write the Hub model card there, which
+  // overwrote the repo's own README - 611 lines of documentation destroyed by a
+  // command whose job is to upload a model. The card is an upload payload, so
+  // it goes somewhere that is not part of the project.
+  const cardDir = process.env.WASMTUNE_CARD_DIR
+    ?? path.join(dir, ".finetune", "model-card");
+  await mkdir(cardDir, { recursive: true });
+  const out = path.join(cardDir, "README.md");
   await writeFile(out, lines.join("\n"));
   return out;
 }
