@@ -9,6 +9,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveDecoding } from "../src/eval/decoding.mjs";
 import process from "node:process";
 
 const execFileAsync = promisify(execFile);
@@ -294,6 +295,9 @@ async function cmdEval(opts, cwd) {
     console.error("[wasmtune] every configured model is pretrained — nothing to evaluate.");
     return;
   }
+  // One decoding resolution shared with eval-onnx, so the two halves of the
+  // quantization gate are comparable and both match the widget.
+  const decoding = resolveDecoding(config, cwd, opts);
   const multi = entries.length > 1;
   for (const entry of entries) {
     const { sub } = entryConfig(config, entry, multi);
@@ -303,11 +307,7 @@ async function cmdEval(opts, cwd) {
       cwd,
       backend,
       maxPrompts: opts.maxPrompts ?? 50,
-      // Must match what eval-onnx uses (and what the widget ships), or the
-      // quantization gate compares a 128-token fp16 baseline against a
-      // 96-token artifact. Longer answers score higher on keyword recall, so
-      // that asymmetry alone can move the delta by more than the threshold.
-      maxTokens: opts.maxTokens ?? sub.chat?.maxTokens ?? 96,
+      maxTokens: decoding.maxTokens ?? 96,
       skipTuned: !!opts["skip-tuned"],
       judge: opts.judge ?? null,
       python: opts.python ?? "python3",
@@ -505,6 +505,7 @@ async function cmdPublish(opts, cwd) {
 
   let uploaded = 0;
   let publishedDtype = null;
+  let publishedRevision = null;
   const skipped = [];
 
   // Hoisted out of the loop below: the model-card upload after the loop needs
@@ -558,7 +559,16 @@ async function cmdPublish(opts, cwd) {
       await uploadFile({ repoId, token, localPath: local, pathInRepo: `${sub}onnx/${ref}`, outDir: finetuneRoot });
       uploaded++;
     }
-    await uploadFile({ repoId, token, localPath: graphPath, pathInRepo: `${sub}onnx/${chosen.file}`, outDir: finetuneRoot });
+    // The commit the upload landed in. transformers.js caches a model by
+    // "<repo>/<path>@<revision>"; with no revision it caches by path alone, so
+    // replacing onnx/model_quantized.onnx in place means every returning visitor
+    // keeps the previous weights and the publish is invisible to them. Writing
+    // the oid into the manifest changes the URL, which invalidates the cache.
+    const graphUpload = await uploadFile({
+      repoId, token, localPath: graphPath,
+      pathInRepo: `${sub}onnx/${chosen.file}`, outDir: finetuneRoot,
+    });
+    publishedRevision = graphUpload.oid ?? publishedRevision;
     uploaded++;
 
     // The graph is useless without its tokenizer. export.py puts the tokenizer
@@ -628,8 +638,14 @@ async function cmdPublish(opts, cwd) {
   const { entry: written } = writeOnnxManifestEntry({
     manifestPath, repoId, dtype: publishedDtype, siteName,
     label: trained[0].label ?? null, base: config.model, chat: config.chat ?? null,
+    revision: publishedRevision,
   });
   console.error(`[wasmtune] wrote ${written.id} -> ${manifestPath}`);
+  if (publishedRevision) {
+    console.error(
+      `[wasmtune] manifest pins revision ${publishedRevision.slice(0, 12)}… — ` +
+      `returning visitors get this upload, not the cached one`);
+  }
   console.error("[wasmtune] the site loads it with: await mountAssistant({ target: \"#chat\" })");
   for (const s of skipped) console.error(`note: ${s}`);
 }
@@ -721,7 +737,15 @@ async function cmdEvalOnnx(opts, cwd) {
   const systemPrompt = (await import("../src/chat/options.mjs"))
     .defaultSystemPrompt(config.dataset?.siteName ?? path.basename(config.dataDir));
 
-  console.error("[wasmtune] evaluating the quantized artifact that the widget loads");
+  // Decode the way the widget does - and the way `wasmtune eval` did, so the
+  // two halves of the gate are comparable. Both read the manifest's chat block
+  // first, because that is the only decoding the widget ever sees; config.chat
+  // is a fallback for a host who has not run convert yet.
+  const decoding = resolveDecoding(config, cwd, opts);
+
+  console.error(
+    "[wasmtune] evaluating the quantized artifact that the widget loads " +
+    `(decoding from ${decoding.source})`);
   // spawn, not execFile: on Windows execFile joins argv into a command line
   // without quoting, and --system-prompt always contains spaces and an
   // apostrophe. The mangled line made the child die with
@@ -733,19 +757,18 @@ async function cmdEvalOnnx(opts, cwd) {
     "--prompts", promptsPath,
     "--out", path.join(outDir, "eval.onnx.json"),
     "--dtype", opts.dtype ?? "q8",
-    "--max-tokens", String(opts.maxTokens ?? 96),
+    "--max-tokens", String(decoding.maxTokens ?? 96),
     "--system-prompt", systemPrompt,
     "--python", opts.python ?? "python3",
     "--tokenizer-dir", tokenizerDir,
-    // Decode the way the widget decodes. These used to be absent, so the ONNX
-    // eval decoded greedily while the browser samples with a repetition
-    // penalty — greedy is far more loop-prone, so the gate was measuring the
-    // decoder rather than the artifact it claims to score.
-    "--temperature", String(config.chat?.temperature ?? 0.3),
-    "--top-p", String(config.chat?.topP ?? 1.0),
-    "--repetition-penalty", String(config.chat?.repetitionPenalty ?? 1.0),
-    "--presence-penalty", String(config.chat?.presencePenalty ?? 0.0),
-    "--frequency-penalty", String(config.chat?.frequencyPenalty ?? 0.0),
+    // These used to come from config.chat, which the widget never sees. The
+    // widget reads the manifest entry's chat block, so a hand-curated manifest
+    // made the gate score under a decoder nobody ships.
+    "--temperature", String(decoding.temperature ?? 0),
+    "--top-p", String(decoding.topP ?? 1),
+    "--repetition-penalty", String(decoding.repetitionPenalty ?? 1),
+    "--presence-penalty", String(decoding.presencePenalty ?? 0),
+    "--frequency-penalty", String(decoding.frequencyPenalty ?? 0),
   ], { cwd: process.cwd() });
 
   // Regression gate: compare against the fp16 eval the model was trained against.

@@ -282,6 +282,25 @@ def reward(prompts, completions, reference=None, **kw):
       passages covering the same facts, and read <code>untraced</code> in
       <code>eval.report.json</code> to see which facts are confabulated rather than learned.
     </p>
+    <h3>Ask it, then judge for yourself</h3>
+    <p>
+      These are the published model's actual answers, with the decoding settings this page uses:
+    </p>
+    <pre class="code"><code>Q: How do rate limits work in Lumen?
+A: "\# is the rate limit in Lumen. It works as follows: If you are using a
+    10 GB SSD and pages in 1-4 sentences..."          corpus facts: NONE
+
+Q: Where are API keys stored?
+A: "&lt;API keys are stored in the database..."              corpus facts: NONE</code></pre>
+    <p class="fine">
+      The corpus says <em>per project, per minute; burst is limit × 1.5; 429 with
+      <code>Retry-After</code></em>, and that keys go to
+      <code>~/.config/lumen/credentials.json</code>. Across four questions of this shape,
+      <b>0 of 4</b> answers carried a single real corpus term. That is what 51 pairs does on a
+      0.5B model — the vocabulary lands, the values do not. It is not a bug in the pipeline, and
+      the pretrained tiers above it are the honest comparison: those have never seen this site
+      and will invent plausible answers about it, which is at least marked as inventing.
+    </p>
   </section>
 
   <section class="panel" id="rag">

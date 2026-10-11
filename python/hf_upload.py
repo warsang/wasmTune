@@ -37,7 +37,7 @@ def main():
         return 3
 
     api = HfApi(token=a.token)
-    api.upload_file(
+    info = api.upload_file(
         path_or_fileobj=a.file,
         repo_id=a.repo,
         path_in_repo=a.path_in_repo,
@@ -45,7 +45,14 @@ def main():
         revision=a.revision,
         commit_message=a.commit_message,
     )
+    # The commit oid is the cache key. transformers.js caches a model by
+    # "<repo>/<path>@<revision>"; without a revision it caches by path alone, so
+    # replacing onnx/model_quantized.onnx in place leaves every returning visitor
+    # holding the previous weights - a new upload is indistinguishable from no
+    # upload at all. Publish puts this oid in the manifest so the URL changes.
+    oid = getattr(info, "oid", None) or ""
     print(f"uploaded {a.path_in_repo} -> {a.repo}")
+    print(f"OID {oid}")
     return 0
 
 

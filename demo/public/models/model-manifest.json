@@ -11,7 +11,8 @@
       "artifacts": {
         "onnx": {
           "id": "warsang/lumen-assistant-qwen2.5-0.5b",
-          "dtype": "q8"
+          "dtype": "q8",
+          "revision": "5ac8665618431ee7348431f94fcf5e0b5e82bc4b"
         }
       },
       "requirements": { "minDeviceMemoryGB": 1, "needsWebGPU": false, "cpuOk": true, "mobileOk": true },

@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import pathMod from "node:path";
+import { resolveDecoding, manifestChat } from "../src/eval/decoding.mjs";
 
 const ROOT = new URL("..", import.meta.url);
 const read = (rel) => readFileSync(new URL(rel, ROOT), "utf8");
@@ -103,20 +107,83 @@ describe("wasmtune eval: same decoding and budget as the artifact's gate", () =>
     }
   });
 
-  it("generates no more tokens than eval-onnx does", () => {
-    // eval-onnx defaults to 96. eval defaulted to 128, so the gate compared a
-    // longer fp16 baseline against a shorter artifact - and longer answers
-    // score higher on keyword recall, so the asymmetry alone could move the
-    // delta past the threshold.
-    const bin = read("bin/wasmtune.mjs");
-    const evalLine = bin.match(/maxTokens: opts\.maxTokens \?\? [^\n]*/);
-    const onnxLine = bin.match(/--max-tokens", String\(opts\.maxTokens \?\? (\d+)\)/);
-    assert.ok(evalLine, "wasmtune eval must resolve a token budget");
-    assert.ok(onnxLine, "eval-onnx must resolve a token budget");
-    const evalBudget = Number(evalLine[0].match(/\?\? [^,\n]*?(\d+)\s*[,)]/)?.[1] ?? NaN);
-    assert.equal(
-      evalBudget, Number(onnxLine[1]),
-      `eval (${evalLine[0].trim()}) and eval-onnx (${onnxLine[1]}) must share one budget`);
+  it("resolves one decoding config shared with eval-onnx", async () => {
+    // eval-onnx and eval must agree, and both must match what the widget reads
+    // - the manifest's chat block. config.chat is a fallback only.
+    const bin = readFileSync(new URL("../bin/wasmtune.mjs", import.meta.url), "utf8");
+    assert.match(bin, /import \{ resolveDecoding \} from "\.\.\/src\/eval\/decoding\.mjs"/);
+    // Both commands call the one resolver.
+    const calls = [...bin.matchAll(/resolveDecoding\(config, cwd, opts\)/g)].length;
+    assert.ok(calls >= 2, `expected both eval and eval-onnx to call resolveDecoding, got ${calls}`);
+    // And both use its budget rather than their own default.
+    assert.match(bin, /maxTokens: decoding\.maxTokens \?\? 96/);
+    assert.match(bin, /"--max-tokens", String\(decoding\.maxTokens \?\? 96\)/);
+  });
+});
+
+describe("decoding: the widget's parameters are the source of truth", () => {
+  const withManifest = async (chat, cfgChat = {}) => {
+    const dir = await mkdtemp(pathMod.join(tmpdir(), "dec-"));
+    await mkdir(pathMod.join(dir, "public", "models"), { recursive: true });
+    await writeFile(
+      pathMod.join(dir, "public", "models", "model-manifest.json"),
+      JSON.stringify({ models: [{ id: "t", source: "tuned", artifacts: { onnx: { id: "a/b", dtype: "q8" } }, chat }] }),
+    );
+    return resolveDecoding({ chat: cfgChat, output: { webDir: "public/models" } }, dir, {});
+  };
+
+  it("reads the manifest entry the widget reads, not config.chat", async () => {
+    const d = await withManifest(
+      { maxTokens: 96, temperature: 0.2, repetitionPenalty: 1.25 },
+      { temperature: 0.9, topP: 0.5, presencePenalty: 0.7 },
+    );
+    assert.equal(d.source, "manifest");
+    assert.equal(d.temperature, 0.2);
+    assert.equal(d.repetitionPenalty, 1.25);
+    assert.equal(d.maxTokens, 96);
+  });
+
+  it("does not fill omitted keys from config.chat", async () => {
+    // The widget reads only the manifest block. A key it omits is a key the
+    // browser does not apply, so falling back to config.chat for it would
+    // reintroduce the exact mismatch this fixes.
+    const d = await withManifest(
+      { maxTokens: 96, temperature: 0.2, repetitionPenalty: 1.25 },
+      { topP: 0.9, presencePenalty: 0.3, frequencyPenalty: 0.5 },
+    );
+    assert.equal(d.topP, null, "top_p must be unset, so the browser uses its own default");
+    assert.equal(d.presencePenalty, null);
+    assert.equal(d.frequencyPenalty, null);
+  });
+
+  it("falls back to config.chat when there is no manifest entry", async () => {
+    const dir = await mkdtemp(pathMod.join(tmpdir(), "dec-"));
+    const d = resolveDecoding(
+      { chat: { temperature: 0.4, topP: 0.8, maxTokens: 64 }, output: { webDir: "public/models" } },
+      dir,
+      {},
+    );
+    assert.equal(d.source, "config.chat");
+    assert.equal(d.temperature, 0.4);
+    assert.equal(d.topP, 0.8);
+  });
+
+  it("explicit flags still win over both", async () => {
+    const dir = await mkdtemp(pathMod.join(tmpdir(), "dec-"));
+    const d = resolveDecoding(
+      { chat: { temperature: 0.4, maxTokens: 64 }, output: { webDir: "public/models" } },
+      dir,
+      { temperature: 0.05, maxTokens: 12 },
+    );
+    assert.equal(d.temperature, 0.05);
+    assert.equal(d.maxTokens, 12);
+  });
+
+  it("returns null for an unreadable manifest rather than throwing", async () => {
+    const dir = await mkdtemp(pathMod.join(tmpdir(), "dec-"));
+    await mkdir(pathMod.join(dir, "public", "models"), { recursive: true });
+    await writeFile(pathMod.join(dir, "public", "models", "model-manifest.json"), "{ not json");
+    assert.equal(manifestChat({ output: { webDir: "public/models" } }, dir), null);
   });
 });
 

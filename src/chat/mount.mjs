@@ -44,6 +44,11 @@ export function resolveEntryArtifacts(entry, manifestHref) {
   const rawGguf = typeof a.gguf === "string" ? a.gguf : a.gguf?.url;
   const gguf = rawGguf ? new URL(rawGguf, manifestHref).href : null;
   const onnx = typeof a.onnx === "string" ? a.onnx : (a.onnx?.id ?? a.onnx?.repo ?? null);
+  // The commit the publish landed in. transformers.js caches a model by
+  // "<repo>/<path>@<revision>", so without one a replaced file at the same path
+  // is served from cache to every returning visitor. Accept both shapes.
+  const onnxRevision = (typeof a.onnx === "object" ? a.onnx?.revision : null)
+    ?? a.onnxRevision ?? null;
   // transformers.js picks onnx/model_<dtype>.onnx, and the dtype strings do not
   // map 1:1 to filenames (q8 is served as model_quantized.onnx). A tier
   // therefore has to say which dtype it actually has, or the loader asks for a
@@ -63,7 +68,7 @@ export function resolveEntryArtifacts(entry, manifestHref) {
       }],
     };
   }
-  return { gguf, onnx, onnxDtype, model, appConfig, chat: entry?.chat ?? {} };
+  return { gguf, onnx, onnxDtype, onnxRevision, model, appConfig, chat: entry?.chat ?? {} };
 }
 
 // Pure manifest -> load plan (unit-testable, no DOM): resolves artifact URLs
@@ -114,7 +119,7 @@ export function planFromManifest(manifest, manifestHref, overrides = {}, { hw = 
 
   const resolved = chosen
     ? resolveEntryArtifacts(chosen, manifestHref)
-    : { gguf: null, onnx: null, onnxDtype: null, model: null, appConfig: null, chat: {} };
+    : { gguf: null, onnx: null, onnxDtype: null, onnxRevision: null, model: null, appConfig: null, chat: {} };
   const fromManifest = chatHints(manifest?.chat ?? {});
   const fromEntry = chatHints(chosen?.chat ?? {});
   const chatOpts = resolveChatOptions({ ...fromManifest, ...fromEntry, ...o });
@@ -128,6 +133,7 @@ export function planFromManifest(manifest, manifestHref, overrides = {}, { hw = 
     appConfig: resolved.appConfig,
     onnx: resolved.onnx,
     onnxDtype: resolved.onnxDtype,
+    onnxRevision: resolved.onnxRevision,
     // The site name the workers were trained with. mountAssistant prefers this
     // over its own siteName argument so the prompt the widget sends matches the
     // prompt the fine-tune was trained on.
@@ -219,7 +225,7 @@ export async function mountAssistant({
     // No manifest (pre-training state): mount an unconfigured element and
     // let the worker report; surface the cause for adapters/debugging.
     plan = {
-      gguf: null, appConfig: null, onnx: null, model: chatOpts.model ?? null,
+      gguf: null, appConfig: null, onnx: null, onnxRevision: null, model: chatOpts.model ?? null,
       chatOpts: resolveChatOptions(chatOpts), manifest: null,
       entry: null, entryId: null, entryRequirements: null,
       hw, hwMismatch: null, forceTier: null, smaller: [],
@@ -233,6 +239,9 @@ export async function mountAssistant({
   if (plan.gguf) el.setAttribute("gguf", plan.gguf);
   if (plan.onnx) el.setAttribute("onnx", plan.onnx);
   if (plan.onnxDtype) el.setAttribute("onnx-dtype", plan.onnxDtype);
+  // The publish commit. Without it transformers.js caches by path alone, so a
+  // replaced model at the same path is served from cache to returning visitors.
+  if (plan.onnxRevision) el.setAttribute("onnx-revision", plan.onnxRevision);
   // transformersUrl is a caller option, not a manifest field: which CDN or
   // self-hosted copy to use is a deployment decision, not a property of a tier.
   if (transformersUrl) el.setAttribute("transformers-url", transformersUrl);

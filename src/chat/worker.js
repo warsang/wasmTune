@@ -22,6 +22,7 @@ let chatOpts = null;
 // transformers.js resolves onnx/model_<dtype>.onnx and the published tier says
 // which dtype it uploaded, so carry it from the manifest through to the load.
 let onnxDtypeResolved = null;
+let onnxRevisionResolved = null;
 // Optional URL for transformers.js. Bundling it inlines onnxruntime-web's wasm
 // (the worker chunk hit 72 MB), so a static host passes a CDN or self-hosted
 // URL instead; consumers with a bundler leave it null and the bare specifier is
@@ -43,10 +44,14 @@ self.onmessage = async (e) => {
 
 let strictArtifacts = false;
 
-async function init({ model, appConfig, modelId, gguf, onnx = null, onnxDtype = null, transformersUrl = null, wasmUrl, chatOpts: opts, strictArtifacts: strict, entryId = null, requirements = null, forceHw = false }) {
+async function init({ model, appConfig, modelId, gguf, onnx = null, onnxDtype = null, onnxRevision = null, transformersUrl = null, wasmUrl, chatOpts: opts, strictArtifacts: strict, entryId = null, requirements = null, forceHw = false }) {
   chatOpts = resolveChatOptions(opts);
   strictArtifacts = !!strict;
   onnxDtypeResolved = onnxDtype;
+  // Pins the model's cache key. transformers.js caches "<repo>/<path>@<rev>";
+  // with no revision it caches by path, so a re-published model at the same path
+  // is served from cache to every returning visitor.
+  onnxRevisionResolved = onnxRevision;
   transformersUrlResolved = transformersUrl;
   try {
     // Hardware gate: refuse tiers this device can't run. mountAssistant
@@ -230,7 +235,10 @@ async function chat({ messages, model, onnx = null, cloudUrl, chatOpts: opts, si
     if (engineKind === "transformers") {
       const { pipeline } = await loadTransformers();
       const gen = await pipeline("text-generation", onnx ?? model ?? "onnx-community/SmolLM2-135M-Instruct-ONNX",
-        onnxDtypeResolved ? { dtype: onnxDtypeResolved } : {});
+        {
+          ...(onnxDtypeResolved ? { dtype: onnxDtypeResolved } : {}),
+          ...(onnxRevisionResolved ? { revision: onnxRevisionResolved } : {}),
+        });
       // Pass the messages through as messages, not as newline-joined text.
       // transformers.js applies the tokenizer's chat template for a
       // ChatCompletionInput, which is what an instruct model was trained on.

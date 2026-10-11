@@ -141,6 +141,9 @@ export async function uploadFile({
   const py = python ?? (venvPy && existsSync(venvPy) ? venvPy
     : (existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3"));
   const script = path.join(PKG_ROOT, "python", "hf_upload.py");
+  // Capture stdout: the uploader prints "OID <commit sha>", which is the cache
+  // key the manifest needs. stderr stays inherited so progress is visible.
+  let stdout = "";
   const child = spawn(py, [
     script,
     "--file", localPath,
@@ -148,13 +151,18 @@ export async function uploadFile({
     "--path-in-repo", pathInRepo,
     "--token", token ?? "",
     "--commit-message", summary ?? `wasmtune: publish ${pathInRepo}`,
-  ], { stdio: ["ignore", "ignore", "inherit"] });
-  await new Promise((resolve, reject) => {
+  ], { stdio: ["ignore", "pipe", "inherit"] });
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (d) => { stdout += d; });
+  const code = await new Promise((resolve, reject) => {
     child.on("error", reject);
-    child.on("close", (code) =>
-      code === 0 ? resolve() : reject(new Error(`upload ${pathInRepo} failed (python exit ${code})`)));
+    child.on("close", resolve);
   });
-  return { pathInRepo, bytes: statSync(localPath).size };
+  if (code !== 0) {
+    throw new Error(`upload ${pathInRepo} failed (python exit ${code})`);
+  }
+  const oid = /^OID (\S+)$/m.exec(stdout)?.[1] ?? null;
+  return { pathInRepo, bytes: statSync(localPath).size, oid };
 }
 
 /**
@@ -231,6 +239,7 @@ export function writeOnnxManifestEntry({
   label = null,
   base = null,
   chat = null,
+  revision = null,
 }) {
   const target = path.resolve(manifestPath);
   let manifest = { version: "0", models: [], notes: [] };
@@ -277,7 +286,7 @@ export function writeOnnxManifestEntry({
       artifacts: {
         ...existing.artifacts,
         onnx: nested
-          ? { ...existingOnnx, id: repoId, ...(dtype ? { dtype } : {}) }
+          ? { ...existingOnnx, id: repoId, ...(dtype ? { dtype } : {}), ...(revision ? { revision } : {}) }
           : repoId,
       },
     };

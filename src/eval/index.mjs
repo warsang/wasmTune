@@ -12,6 +12,7 @@ import { evalLoopContrasts } from "../dataset/dpo.mjs";
 import { collectTexts } from "../dataset/collect.mjs";
 import { chunkDocs } from "../dataset/chunk.mjs";
 import { scoreResponse, summarize, faithfulness, scoreConversation, CONVERSE_PROBES, hasRepetitionLoop } from "./score.mjs";
+import { resolveDecoding } from "./decoding.mjs";
 import { parseJudgeSpec, judgeRows } from "./judge.mjs";
 import { ensureVenv, runPython } from "../train/venv.mjs";
 
@@ -104,31 +105,29 @@ export async function runEval(config, { cwd = process.cwd(), backend = "mlx", ma
 
   await ensureVenv({ outDir, backend, cwd, python });
   const modelForBackend = backend === "mlx" ? (config.training?.mlxModel ?? config.model) : config.model;
+  // Decode the way the widget does, and the way eval-onnx does. Both read the
+  // manifest's chat block first: the widget never sees config.chat, so scoring
+  // against config.chat scores a decoder nobody ships. When they disagree the
+  // gate measures the mismatch instead of the model.
+  const decoding = resolveDecoding(config, cwd, opts);
   const runOne = async (label, adapters) => {
     const outPath = path.join(outDir, `eval.out.${label}.json`);
     const args = ["--backend", backend === "mlx" ? "mlx" : "cuda",
       "--model", modelForBackend, "--prompts", promptsPath, "--out", outPath,
-      "--max-tokens", String(maxTokens)];
+      "--max-tokens", String(decoding.maxTokens ?? 96)];
     // Score the model under the prompt it will actually be served with; the
     // base otherwise injects its own default system message.
     args.push("--system-prompt",
       (await import("../chat/options.mjs")).defaultSystemPrompt(
         config.dataset?.siteName ?? path.basename(path.resolve(cwd, config.dataDir))));
-    if (adapters) args.push("--adapters", adapters);
-    // Decode the way the widget does. This used to call eval_lm.py with no
-    // decoding flags, so it defaulted to greedy while the browser samples with a
-    // repetition penalty. Greedy is far more loop-prone, and `eval-onnx` scores
-    // the artifact with the widget's settings — so the gate was comparing a
-    // greedy fp16 baseline against a sampled artifact and attributing the
-    // difference to quantization.
-    const chat = config.chat ?? {};
     args.push(
-      "--temperature", String(chat.temperature ?? 0.3),
-      "--top-p", String(chat.topP ?? 1.0),
-      "--repetition-penalty", String(chat.repetitionPenalty ?? 1.0),
-      "--presence-penalty", String(chat.presencePenalty ?? 0.0),
-      "--frequency-penalty", String(chat.frequencyPenalty ?? 0.0),
+      "--temperature", String(decoding.temperature ?? 0),
+      "--top-p", String(decoding.topP ?? 1),
+      "--repetition-penalty", String(decoding.repetitionPenalty ?? 1),
+      "--presence-penalty", String(decoding.presencePenalty ?? 0),
+      "--frequency-penalty", String(decoding.frequencyPenalty ?? 0),
     );
+    if (adapters) args.push("--adapters", adapters);
     await runPython({ outDir, script: "python/eval_lm.py", args, cwd });
     return JSON.parse(await readFile(outPath, "utf8"));
   };

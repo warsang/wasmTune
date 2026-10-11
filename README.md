@@ -312,23 +312,33 @@ to anyone.
 
 ## Eval decodes like the widget, or it measures the decoder
 
-`eval` and `eval-onnx` both take the decoding parameters from `config.chat`
-(temperature, top-p, repetition/presence/frequency penalties) and the token
-budget from `chat.maxTokens`. This is load-bearing for the quantization gate:
-it compares an artifact against the fp16 weights it was quantized from, so if
-the two halves decode differently the delta measures the decoders rather than
-quantization.
+`eval` and `eval-onnx` both take their decoding parameters from **the manifest
+entry's `chat` block** — the only decoding the widget ever sees. `config.chat`
+is a fallback for a host who has not run `convert` yet, and a key the manifest
+omits stays omitted: the browser does not apply it either, so filling it from
+`config.chat` would reintroduce the mismatch.
 
-That is not hypothetical. `eval-onnx` used to decode greedily — the flags were
-never forwarded from the wrapper script — while the browser samples with a
-repetition penalty. Greedy is much more loop-prone, and the gate dutifully
-reported *"the quantized artifact loops on 4 prompts"* that the artifact, under
-its own decoding settings, does not loop on at all. It also used to generate 96
-tokens while `eval` generated 128, and longer answers score higher on keyword
-recall, so that asymmetry alone could move the delta past the threshold.
+This is load-bearing for the quantization gate: it compares an artifact against
+the fp16 weights it was quantized from, so if the two halves decode differently
+the delta measures the decoders rather than quantization.
 
-Measured on this repo's corpus, both halves on the same 39 holdout prompts,
-same decoding, same 96-token budget:
+That is not hypothetical — three ways it went wrong, in order of discovery:
+
+1. `eval-onnx` decoded greedily — the flags were never forwarded from the
+   wrapper script — while the browser samples with a repetition penalty. Greedy
+   is much more loop-prone, and the gate reported *"the quantized artifact loops
+   on 4 prompts"* that the artifact, under its own decoding settings, does not
+   loop on at all.
+2. `eval-onnx` generated 96 tokens while `eval` generated 128. Longer answers
+   score higher on keyword recall, so that asymmetry alone could move the delta
+   past the threshold.
+3. Both took their parameters from `config.chat` while the widget reads the
+   manifest. A hand-curated manifest that omits `topP`/`presencePenalty`/
+   `frequencyPenalty` therefore had the gate scoring under penalties the browser
+   never applies — which is how a gate can miss loops the browser does hit.
+
+Measured on this repo's corpus, both halves on the same 39 holdout prompts, same
+decoding, same 96-token budget, taken from the manifest:
 
 ```
   fp16     avg=0.135  faith=0.215  looped=0
@@ -339,6 +349,9 @@ same decoding, same 96-token budget:
 The gate fails on an average drop over `WASMTUNE_QUANT_DROP` (default 0.1), or
 on any repetition loop the fp16 weights did not have — that failure mode is the
 one quantization is known for and no average check sees it.
+
+`eval-onnx` prints which source it used (`decoding from manifest`) so you can
+tell which of the two you are looking at.
 
 ## The published tier, and what it actually does
 
@@ -358,9 +371,28 @@ What it will and will not do, measured rather than implied:
 | completions carrying a real corpus term | 2/44 | 1/44 |
 | faithfulness (fp16) | 0.238 | 0.46 |
 
-The retrain fixed the format mismatch and removed the confidently-wrong output.
-It did **not** make the model answer questions about the corpus: it still does
-not, and on 51 pairs it will not. The tier stays labelled a smoke test.
+Run against the published artifact on the questions visitors actually ask,
+with the browser's own decoding settings:
+
+```
+Q: How do rate limits work in Lumen?
+A: "\# is the rate limit in Lumen. It works as follows: If you are using a
+    10 GB SSD and pages in 1-4 sentences..."        facts in it: NONE
+
+Q: Where are API keys stored?
+A: "<API keys are stored in the database..."        facts in it: NONE
+```
+
+**0 of 4 carried a single corpus fact.** The corpus says *per project, per
+minute; burst is limit × 1.5; 429 with `Retry-After`*, and keys go to
+`~/.config/lumen/credentials.json`. What the model produces is fluent,
+on-topic-shaped, and factually empty — it learned the vocabulary and the
+answer format, and almost none of the values.
+
+That is the expected behaviour of 6 pages / 51 pairs / ~150 gradient steps, not
+a symptom of anything still broken. It is why the demo page labels the tier a
+smoke test, and why *Limits* below is the section that matters for anyone
+considering training on real content.
 
 ## Model tiers & hardware detection
 
@@ -555,7 +587,7 @@ await mountAssistant({ target: "#chat", workerUrl: "/worker.js" });
 `eval-onnx` — scores the **quantized** ONNX graph the widget will load, using the same tokenizer and scorer the browser uses. Drops more than `WASMTUNE_QUANT_DROP` (default 0.1) below the fp16 `eval` score ⇒ non-zero exit. Override with `--force` when you accept the loss, `--quant-drop 0.05` to tighten.
 `serve` — static preview server for the chat widget + converted model.
 `build` — one-shot dataset → train → eval → convert. The eval gate throws on regression, so a bad model fails the build instead of shipping. Retraining is nondeterministic, so `build` never publishes — that stays a separate command.
-`publish` — upload converted artifacts to the Hugging Face Hub, verify the sha256 of what landed matches the file on disk, and write the manifest entry itself. Needs `HF_TOKEN`. Destructive nowhere: re-running re-uploads the same bytes. The graph goes to `<repo>/onnx/<dtype>` — no per-slug prefix, because that is the path transformers.js resolves from `artifacts.onnx.id`. Uploads stream through `huggingface_hub` from the training venv (`python/hf_upload.py`), so `optimum[onnxruntime]` must be installed; `HF_HUB_DISABLE_XET=1` forces plain LFS where the Xet backend is unreachable. The model card is written to `.finetune/model-card/README.md` and uploaded, never over your repo's README.
+`publish` — upload converted artifacts to the Hugging Face Hub, verify the sha256 of what landed matches the file on disk, and write the manifest entry itself. Needs `HF_TOKEN`. Destructive nowhere: re-running re-uploads the same bytes. The graph goes to `<repo>/onnx/<dtype>` — no per-slug prefix, because that is the path transformers.js resolves from `artifacts.onnx.id`. It also writes the **commit oid** into `artifacts.onnx.revision`, and the widget passes that to transformers.js: models are cached by `<repo>/<path>@<revision>`, so without a revision a file replaced in place is served from cache to every returning visitor and a re-publish is invisible to them. Uploads stream through `huggingface_hub` from the training venv (`python/hf_upload.py`); `HF_HUB_DISABLE_XET=1` forces plain LFS where the Xet backend is unreachable. The model card is written to `.finetune/model-card/README.md` and uploaded, never over your repo's README.
 
 Every command is also a plain function import (`import { dataset, train, eval as evaluate } from "wasmtune"`) if you want it inside a script rather than the CLI.
 
