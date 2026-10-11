@@ -338,13 +338,17 @@ That is not hypothetical — three ways it went wrong, in order of discovery:
    never applies — which is how a gate can miss loops the browser does hit.
 
 Measured on this repo's corpus, both halves on the same 39 holdout prompts, same
-decoding, same 96-token budget, taken from the manifest:
+decoding, same 96-token budget, both taken from the manifest:
 
 ```
   fp16     avg=0.135  faith=0.215  looped=0
-  q8       avg=0.098  faith=0.435  looped=0
-  quantization cost: avg -0.037, faithfulness +0.220, loops +0
+  q8       avg=0.115  faith=0.369  looped=0
+  quantization cost: avg -0.020, faithfulness +0.154, loops +0
 ```
+
+Note that the delta got *smaller* once the gate decoded like the browser: the
+mismatched version reported −0.037, the matched one −0.020. A gate that reads
+better than the artifact does is not a conservative failure.
 
 The gate fails on an average drop over `WASMTUNE_QUANT_DROP` (default 0.1), or
 on any repetition loop the fp16 weights did not have — that failure mode is the
