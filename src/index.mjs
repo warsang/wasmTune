@@ -6,3 +6,23 @@ export { resolveBackend, detectPlatform } from "./train/router.mjs";
 export { convertModel, pretrainedEntry, writeModelsManifest } from "./convert/to_mlc.mjs";
 export { checkServing } from "./serve-check.mjs";
 export { serve } from "./serve.mjs";
+
+// Retrieval. The same API runs in Node (building an index at build time) and in
+// the browser (embedding a query, retrieving, purging a session's chunks).
+export {
+  PUBLIC_SCOPE,
+  buildIndex,
+  chunksFromDocs,
+  createRag,
+  cosine,
+  indexScopes,
+  loadIndex,
+  purgeScope,
+  searchChunks,
+  splitSections,
+  windowText,
+} from "./rag/index.mjs";
+export { createLexicalEmbedder, createTransformersEmbedder, resolveEmbedder } from "./rag/embed.mjs";
+export { buildGroundedUserMessage, citedSources, withRagSystemPrompt, DEFAULT_RAG_INSTRUCTIONS } from "./rag/prompt.mjs";
+export { CONTACT_ACTION, parseAction, validateAction, stripAction, actionInstruction } from "./rag/action.mjs";
+export { cacheKey, clearIndexes, loadIndex as loadStoredIndex, saveIndex } from "./rag/store.mjs";
