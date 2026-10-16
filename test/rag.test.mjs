@@ -15,7 +15,7 @@ import {
 } from "../src/rag/index.mjs";
 import { createLexicalEmbedder, assertImportable, resolveEmbedder } from "../src/rag/embed.mjs";
 import { buildGroundedUserMessage, citedSources, withRagSystemPrompt } from "../src/rag/prompt.mjs";
-import { parseToolCall, toolInstruction } from "../src/rag/action.mjs";
+import { parseToolCall, stripToolCalls, toolInstruction } from "../src/rag/action.mjs";
 import { createToolRegistry } from "../src/rag/tools.mjs";
 import { saveIndex } from "../src/rag/store.mjs";
 import { PUBLIC_SCOPE as SCOPE_CONSTANT } from "../src/rag/scope.mjs";
@@ -282,6 +282,17 @@ describe("tool calls", () => {
     const { call, text } = parseToolCall("We offer audits and deployment.");
     assert.equal(call, null);
     assert.equal(text, "We offer audits and deployment.");
+  });
+
+  it("parses and strips repeatedly without regex state leaking", () => {
+    // A shared /g regex carries lastIndex between calls, so matching here and
+    // replacing there could skip the marker or leave it in the visible text.
+    const reply = 'ok\n<tool>a</tool>{"x":1}';
+    for (let i = 0; i < 3; i++) {
+      assert.deepEqual(parseToolCall(reply, { allowed: ["a"] }).call, { name: "a", args: { x: 1 } });
+      assert.equal(stripToolCalls(reply).includes("<tool>"), false);
+    }
+    assert.equal(stripToolCalls("no tools here"), "no tools here");
   });
 
   it("builds an instruction only when tools exist", () => {

@@ -65,6 +65,72 @@ function mkButton(label, fn) {
   return b;
 }
 
+// --- retrieval + tools, inlined -------------------------------------------
+//
+// SiteChat.js stays import-free so defineSiteChat() works from any bundler, so
+// the three small pieces it needs from src/rag live here as mirrors. Behaviour
+// is pinned by the shared vectors in test/rag.test.mjs (grounding format, tool
+// marker, citation indexes); the full implementations — chunking, embedders,
+// the tool registry, the scope filter — are passed in as objects the host built.
+//
+// The marker is a factory, not a shared RegExp. A module-level /g regex carries
+// `lastIndex` between uses, so the same object matched in one function and
+// replaced in another can skip or miss depending on call order — the kind of bug
+// that shows up as "the tool fired but the text still shows the marker".
+const TOOL_MARKER_SRC = "<tool>\\s*([a-z0-9_.-]+)\\s*</tool>\\s*(\\{[^}]*\\})?";
+const toolMarkerRe = () => new RegExp(TOOL_MARKER_SRC, "gi");
+
+function stripToolMarkers(text) {
+  return String(text ?? "").replace(toolMarkerRe(), "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** The user turn the model sees: numbered context, then the question. */
+function groundQuestion(question, passages) {
+  if (!passages?.length) return question;
+  const context = passages
+    .map((p, i) => {
+      const where = p.title ? ` — ${p.title}` : "";
+      const url = p.url ? ` (${p.url})` : "";
+      return `[${i + 1}]${where}${url}\n${p.text}`;
+    })
+    .join("\n\n");
+  return (
+    "Answer from the numbered context below. Cite the numbers you used, like [1]. " +
+    "If the context does not answer the question, say so plainly instead of guessing.\n\n" +
+    `<context>\n${context}\n</context>\n\nQuestion: ${question}`
+  );
+}
+
+function toolCallIn(text) {
+  const matches = [...String(text ?? "").matchAll(toolMarkerRe())];
+  if (matches.length !== 1) return null;
+  const [match] = matches;
+  let args = {};
+  if (match[2]) {
+    try {
+      args = JSON.parse(match[2]);
+    } catch {
+      return null;
+    }
+  }
+  return { name: match[1].toLowerCase(), args };
+}
+
+function citedSources(answer, passages) {
+  if (!passages?.length) return [];
+  const cited = new Set();
+  for (const m of String(answer ?? "").matchAll(/\[(\d{1,2})\]/g)) {
+    const n = Number(m[1]);
+    if (n >= 1 && n <= passages.length) cited.add(n - 1);
+  }
+  const indexes = cited.size ? [...cited].sort((a, b) => a - b) : passages.map((_, i) => i);
+  const seen = new Set();
+  return indexes
+    .map((i) => passages[i])
+    .filter((p) => p && p.url && !seen.has(p.url) && seen.add(p.url))
+    .map((p) => ({ url: p.url, title: p.title ?? null }));
+}
+
 export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = false, workerUrl = null, title = "Site assistant", cloudUrl = null, systemPrompt = null, temperature, repetitionPenalty, presencePenalty, frequencyPenalty, maxTokens, topP, templateKwargs } = {}) {
   if (typeof window === "undefined" || typeof customElements === "undefined") {
     throw new Error("<site-chat> needs a browser DOM");
@@ -141,6 +207,8 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       if (this.cloudUrl) this._cloudUrl = this.cloudUrl;
       if (this.getAttribute("cloud-url")) this._cloudUrl = this.getAttribute("cloud-url");
       if (this.getAttribute("allow-force") != null) this._allowForce = true;
+      if (this.rag) this._rag = this.rag;
+      if (this.tools) this._tools = this.tools;
       if (this.entryId) this._entryId = this.entryId;
       if (this.entryRequirements) this._entryRequirements = this.entryRequirements;
       if (this.hwMismatch) this._hwMismatch = this.hwMismatch;
@@ -155,7 +223,7 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
         input.value = "";
         this.say("u", text);
         this._showPending();
-        this._worker?.postMessage({ type: "chat", messages: this._history(), model: this._model, onnx: this._onnx, cloudUrl: this._cloudUrl, chatOpts: this._chatOpts, siteName: this._siteName });
+        void this._ask(text);
       });
       this._historyCache = [];
       if (this._hwMismatch) this._showHwMismatch(this._hwMismatch);
@@ -171,6 +239,104 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
       input.value = String(text ?? "");
       this.shadowRoot.querySelector("form")?.requestSubmit();
       return true;
+    }
+    /**
+     * Retrieval runs before the model does. The request carries the grounded
+     * user turn; the visible log and the history keep what the visitor typed, so
+     * a second question is not answered against the first question's context.
+     */
+    async _ask(text) {
+      let passages = [];
+      if (this._rag?.retrieve) {
+        try {
+          passages = await this._rag.retrieve(text);
+        } catch (err) {
+          // Retrieval failing is not the model failing: answer without context
+          // rather than leaving the pending indicator up forever.
+          this._status.textContent = `retrieval failed: ${err?.message ?? err}`;
+        }
+      }
+      this._passages = passages;
+      const messages = this._history().slice(0, -1);
+      messages.push({ role: "user", content: groundQuestion(text, passages) });
+      this._post(messages);
+    }
+    _post(messages = null) {
+      this._worker?.postMessage({
+        type: "chat",
+        messages: messages ?? this._history(),
+        model: this._model,
+        onnx: this._onnx,
+        cloudUrl: this._cloudUrl,
+        chatOpts: this._chatOpts,
+        siteName: this._siteName,
+      });
+    }
+    /** Narrow or widen what this session may retrieve; [] is the signed-out state. */
+    setRagScope(scope) {
+      this._rag?.setScope?.(scope);
+      return this._rag?.scope ?? null;
+    }
+    purgeRag(scope) {
+      return this._rag?.purgeScope?.(scope) ?? null;
+    }
+    /**
+     * A finished answer may name a tool. Running it is the point of having the
+     * model in the page: the page does the thing, with its own code.
+     */
+    async _afterAnswer(answer) {
+      const call = this._tools ? toolCallIn(answer) : null;
+      if (!call) {
+        this._showSources(answer);
+        return;
+      }
+      let result;
+      try {
+        result = await this._tools.run(call.name, call.args, {
+          element: this,
+          siteName: this._siteName,
+        });
+      } catch (err) {
+        result = { ok: false, name: call.name, error: String(err?.message ?? err) };
+      }
+      this._showToolResult(call, result);
+      // An answer can both cite passages and ask for a tool. Showing the tool
+      // result must not swallow the citations — they are how a reader checks the
+      // part of the answer that came from the site.
+      this._showSources(answer);
+      this.dispatchEvent(new CustomEvent("site-chat-tool", { bubbles: true, detail: { ...call, result } }));
+    }
+    _showSources(answer) {
+      const sources = citedSources(answer, this._passages ?? []);
+      if (!sources.length) return;
+      const div = document.createElement("div");
+      div.className = "row sources";
+      div.style.cssText = "font-size:11px;opacity:.8";
+      div.append(document.createTextNode("sources: "));
+      sources.forEach((source, i) => {
+        if (i) div.append(document.createTextNode(" · "));
+        const link = document.createElement("a");
+        link.href = source.url;
+        link.textContent = source.title ?? source.url;
+        link.style.color = "inherit";
+        div.append(link);
+      });
+      this._log.append(div);
+      this._log.scrollTop = this._log.scrollHeight;
+    }
+    _showToolResult(call, result) {
+      const div = document.createElement("div");
+      div.className = "row tool";
+      div.dataset.tool = call.name;
+      div.style.cssText = "font-size:12px;opacity:.9";
+      const summary = result?.ok
+        ? typeof result.result === "string"
+          ? result.result
+          : result.result?.message ?? "done"
+        : result?.error ?? "failed";
+      div.textContent = `${result?.ok ? "✓" : "✕"} ${call.name}: ${summary}`;
+      this._log.append(div);
+      this._log.scrollTop = this._log.scrollHeight;
     }
     get readyState() {
       if (this._readyFired) return "ready";
@@ -243,6 +409,7 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
             // the turn, including on the loop-tripped path.
             this._clearPending();
             if (!m.looped) this._historyCache.push({ role: "assistant", content: m.full });
+            void this._afterAnswer(m.full);
           } else if (m.type === "error") {
             this._clearPending();
             this._status.textContent = m.message;
@@ -254,7 +421,13 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
           model: this._model, gguf: this._gguf, onnx: this._onnx, onnxDtype: this._onnxDtype, onnxRevision: this._onnxRevision,
           transformersUrl: this._transformersUrl,
           appConfig: this._appConfig,
-          chatOpts: this._chatOpts, entryId: this._entryId,
+          // A registered tool set gets its instruction appended to the system
+          // prompt, because a model cannot ask for a tool it has not been told
+          // about — and the tool list is a property of this page, not of training.
+          chatOpts: this._tools?.instruction
+            ? { ...this._chatOpts, systemPrompt: [this._chatOpts?.systemPrompt, this._tools.instruction()].filter(Boolean).join(" ") }
+            : this._chatOpts,
+          entryId: this._entryId,
           requirements: this._entryRequirements, forceHw: !!this._forceHw,
         };
         this._initParams = init;
@@ -407,9 +580,11 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
         this._log.append(last);
       }
       // Render the thinking-stripped view of the full raw stream so far:
-      // reasoning models leak <think> blocks mid-stream otherwise.
+      // reasoning models leak <think> blocks mid-stream otherwise. Tool markers
+      // are stripped too — the marker is an instruction to the page, not
+      // something the visitor should watch being typed.
       last.dataset.raw += t;
-      last.lastChild.textContent = stripThinkingInline(last.dataset.raw).text;
+      last.lastChild.textContent = stripToolMarkers(stripThinkingInline(last.dataset.raw).text);
       this._log.scrollTop = this._log.scrollHeight;
     }
     _retractStream(cleanText, fallback) {
