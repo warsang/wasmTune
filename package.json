@@ -39,6 +39,12 @@
     "./chat/react": "./src/chat/react.jsx",
     "./chat/vue": "./src/chat/vue.mjs",
     "./chat/svelte": "./src/chat/SiteChat.svelte",
+    "./rag": "./src/rag/index.mjs",
+    "./rag/tools": "./src/rag/tools.mjs",
+    "./rag/embed": "./src/rag/embed.mjs",
+    "./rag/prompt": "./src/rag/prompt.mjs",
+    "./rag/store": "./src/rag/store.mjs",
+    "./rag/scope": "./src/rag/scope.mjs",
     "./package.json": "./package.json"
   },
   "peerDependencies": {
