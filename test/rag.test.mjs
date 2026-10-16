@@ -15,7 +15,7 @@ import {
 } from "../src/rag/index.mjs";
 import { createLexicalEmbedder, assertImportable, resolveEmbedder } from "../src/rag/embed.mjs";
 import { buildGroundedUserMessage, citedSources, withRagSystemPrompt } from "../src/rag/prompt.mjs";
-import { parseToolCall, toolInstruction } from "../src/rag/action.mjs";
+import { parseToolCall, stripToolCalls, toolInstruction } from "../src/rag/action.mjs";
 import { createToolRegistry } from "../src/rag/tools.mjs";
 import { saveIndex } from "../src/rag/store.mjs";
 import { PUBLIC_SCOPE as SCOPE_CONSTANT } from "../src/rag/scope.mjs";
