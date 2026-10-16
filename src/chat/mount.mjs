@@ -322,9 +322,14 @@ export async function mountAssistant({
     el.forceTier = plan.forceTier;
   }
   if (plan.smaller?.length) el.smallerTiers = plan.smaller;
-  // Retrieval and tools are attached to the element, not to the worker: both are
-  // properties of the page (its index, its functions), and the widget needs them
-  // synchronously on submit.
+  if (tools) el.tools = tools;
+  // Retrieval is resolved before the element is connected, because `tools` and
+  // `rag` are read when the worker starts — but a failure here is *reported*
+  // after `host.append(el)`, further down. Dispatching on a detached element
+  // cannot bubble anywhere: the caller's own `onEvent` on the element would see
+  // it, and a listener they put on the target container would not, which is the
+  // difference between a diagnosable failure and a silent one.
+  let ragError = null;
   if (rag) {
     try {
       const context = await resolveRagContext(
@@ -334,14 +339,10 @@ export async function mountAssistant({
       el.rag = context;
     } catch (err) {
       // A broken index is not a broken widget: the chat still answers, from the
-      // model alone, and the reason is on the event stream.
-      el.dispatchEvent(new CustomEvent("site-chat-error", {
-        bubbles: true,
-        detail: { message: `retrieval unavailable: ${err?.message ?? err}` },
-      }));
+      // model alone, and the reason goes on the event stream once it can travel.
+      ragError = `retrieval unavailable: ${err?.message ?? err}`;
     }
   }
-  if (tools) el.tools = tools;
   if (onEvent) {
     el.addEventListener("site-chat-ready", onEvent);
     el.addEventListener("site-chat-error", onEvent);
@@ -360,5 +361,11 @@ export async function mountAssistant({
     });
   });
   host.append(el);
+  // Now that the element is in the tree the event can travel: the caller's
+  // `onEvent` on the element sees it, and so does anything listening on the
+  // container they passed as `target`.
+  if (ragError) {
+    el.dispatchEvent(new CustomEvent("site-chat-error", { bubbles: true, detail: { message: ragError } }));
+  }
   return { element: el, ready, plan };
 }

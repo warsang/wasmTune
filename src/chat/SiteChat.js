@@ -72,10 +72,16 @@ function mkButton(label, fn) {
 // is pinned by the shared vectors in test/rag.test.mjs (grounding format, tool
 // marker, citation indexes); the full implementations — chunking, embedders,
 // the tool registry, the scope filter — are passed in as objects the host built.
-const TOOL_MARKER = /<tool>\s*([a-z0-9_.-]+)\s*<\/tool>\s*(\{[^}]*\})?/gi;
+//
+// The marker is a factory, not a shared RegExp. A module-level /g regex carries
+// `lastIndex` between uses, so the same object matched in one function and
+// replaced in another can skip or miss depending on call order — the kind of bug
+// that shows up as "the tool fired but the text still shows the marker".
+const TOOL_MARKER_SRC = "<tool>\\s*([a-z0-9_.-]+)\\s*</tool>\\s*(\\{[^}]*\\})?";
+const toolMarkerRe = () => new RegExp(TOOL_MARKER_SRC, "gi");
 
 function stripToolMarkers(text) {
-  return String(text ?? "").replace(TOOL_MARKER, "").replace(/\n{3,}/g, "\n\n").trim();
+  return String(text ?? "").replace(toolMarkerRe(), "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /** The user turn the model sees: numbered context, then the question. */
@@ -96,7 +102,7 @@ function groundQuestion(question, passages) {
 }
 
 function toolCallIn(text) {
-  const matches = [...String(text ?? "").matchAll(TOOL_MARKER)];
+  const matches = [...String(text ?? "").matchAll(toolMarkerRe())];
   if (matches.length !== 1) return null;
   const [match] = matches;
   let args = {};
@@ -294,6 +300,10 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
         result = { ok: false, name: call.name, error: String(err?.message ?? err) };
       }
       this._showToolResult(call, result);
+      // An answer can both cite passages and ask for a tool. Showing the tool
+      // result must not swallow the citations — they are how a reader checks the
+      // part of the answer that came from the site.
+      this._showSources(answer);
       this.dispatchEvent(new CustomEvent("site-chat-tool", { bubbles: true, detail: { ...call, result } }));
     }
     _showSources(answer) {

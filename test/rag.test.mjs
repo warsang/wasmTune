@@ -284,6 +284,17 @@ describe("tool calls", () => {
     assert.equal(text, "We offer audits and deployment.");
   });
 
+  it("parses and strips repeatedly without regex state leaking", () => {
+    // A shared /g regex carries lastIndex between calls, so matching here and
+    // replacing there could skip the marker or leave it in the visible text.
+    const reply = 'ok\n<tool>a</tool>{"x":1}';
+    for (let i = 0; i < 3; i++) {
+      assert.deepEqual(parseToolCall(reply, { allowed: ["a"] }).call, { name: "a", args: { x: 1 } });
+      assert.equal(stripToolCalls(reply).includes("<tool>"), false);
+    }
+    assert.equal(stripToolCalls("no tools here"), "no tools here");
+  });
+
   it("builds an instruction only when tools exist", () => {
     assert.equal(toolInstruction([]), "");
     assert.match(toolInstruction(["submit_contact_form"]), /submit_contact_form/);

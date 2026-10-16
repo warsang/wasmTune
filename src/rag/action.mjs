@@ -11,7 +11,18 @@
 // point of this module is to decide whether the page should *run* something
 // because of it.
 
-export const TOOL_RE = /<tool>\s*([a-z0-9_.-]+)\s*<\/tool>\s*(\{[^}]*\}|\[[^\]]*\])?/gi;
+// A factory, not a shared RegExp: a module-level /g regex carries `lastIndex`
+// between calls, so matching in one place and replacing in another can skip or
+// miss depending on order. Same shape as the widget's mirror of this marker.
+const TOOL_RE_SRC = "<tool>\\s*([a-z0-9_.-]+)\\s*</tool>\\s*(\\{[^}]*\\}|\\[[^\\]]*\\])?";
+/** Prefer this: a fresh regex per call cannot be left in a bad state. */
+export const toolRe = () => new RegExp(TOOL_RE_SRC, "gi");
+/**
+ * Kept because it was already exported, but this module never uses it
+ * internally — a caller that shares one /g instance across matches inherits the
+ * `lastIndex` trap, which is exactly why `toolRe()` exists.
+ */
+export const TOOL_RE = toolRe();
 
 /**
  * Parse a reply into zero or one tool call.
@@ -23,7 +34,7 @@ export const TOOL_RE = /<tool>\s*([a-z0-9_.-]+)\s*<\/tool>\s*(\{[^}]*\}|\[[^\]]*
  */
 export function parseToolCall(reply, { allowed = null } = {}) {
   const text = String(reply ?? "");
-  const matches = [...text.matchAll(TOOL_RE)];
+  const matches = [...text.matchAll(toolRe())];
   if (!matches.length) return { call: null, text: stripToolCalls(text) };
   if (matches.length > 1) {
     return {
@@ -56,7 +67,7 @@ export function parseToolCall(reply, { allowed = null } = {}) {
 
 export function stripToolCalls(text) {
   return String(text ?? "")
-    .replace(TOOL_RE, "")
+    .replace(toolRe(), "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
