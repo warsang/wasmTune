@@ -9,6 +9,59 @@
 import { defineSiteChat } from "./SiteChat.js";
 import { resolveChatOptions } from "./options.mjs";
 import { detectHardware, manifestEntries, pickModel, resolveRequirements, smallerEntries } from "./hardware.mjs";
+import { createRag, loadIndex } from "../rag/index.mjs";
+import { resolveEmbedder } from "../rag/embed.mjs";
+import { loadIndex as loadStoredIndex, saveIndex } from "../rag/store.mjs";
+
+/**
+ * Build the retrieval context from an `indexUrl`, or pass through a context the
+ * caller already built (which is what a host with session data wants, because it
+ * has to add and purge scopes itself).
+ *
+ * Cached in IndexedDB under the embedder id plus the index URL, so a returning
+ * visitor re-reads nothing. The key is deliberately (url, embedder) and not a
+ * hash of the index: a hash would require fetching the index to compute the key,
+ * which is the download the cache exists to avoid. Re-publishing an index at the
+ * same URL therefore needs a cache-busting query (`?v=2`) or `clearIndexes()` —
+ * documented rather than guessed at.
+ */
+async function resolveRagContext(rag, { fetchImpl = fetch } = {}) {
+  if (!rag) return null;
+  if (typeof rag.retrieve === "function") return rag; // already built by the host
+  if (!rag.indexUrl) throw new Error("rag needs either an indexUrl or a built context");
+  const href = new URL(rag.indexUrl, currentBase()).href;
+  const embedderSpec = rag.embedder ?? null;
+  const key = `rag:${embedderSpec ?? "from-index"}:${href}`;
+
+  let index = null;
+  try {
+    index = await loadStoredIndex(key);
+  } catch {
+    index = null; // no IndexedDB (private mode, a worker): fall through to the network
+  }
+  if (!index) {
+    const res = await fetchImpl(href, { cache: "no-store" });
+    if (!res.ok) throw new Error(`rag index fetch failed: ${href} (HTTP ${res.status})`);
+    index = await res.json();
+  }
+
+  const loaded = await loadIndex(index, {
+    resolveEmbedder,
+    dtype: rag.dtype ?? "q8",
+    transformersUrl: rag.transformersUrl ?? null,
+  });
+  try {
+    await saveIndex(loaded.index, { key });
+  } catch {
+    // Persisting is an optimisation; a failure here must not stop the chat.
+  }
+  return createRag({
+    index: loaded.index,
+    embedder: loaded.embedder,
+    ...(rag.topK !== undefined ? { topK: rag.topK } : {}),
+    ...(rag.minScore !== undefined ? { minScore: rag.minScore } : {}),
+  });
+}
 
 function currentBase() {
   return globalThis.location?.href
@@ -198,6 +251,8 @@ export async function mountAssistant({
   hardware = null,
   allowForce = false,
   preferModel = null,
+  rag = null,
+  tools = null,
   onEvent = null,
   ...chatOpts
 } = {}) {
@@ -267,6 +322,26 @@ export async function mountAssistant({
     el.forceTier = plan.forceTier;
   }
   if (plan.smaller?.length) el.smallerTiers = plan.smaller;
+  // Retrieval and tools are attached to the element, not to the worker: both are
+  // properties of the page (its index, its functions), and the widget needs them
+  // synchronously on submit.
+  if (rag) {
+    try {
+      const context = await resolveRagContext(
+        typeof rag === "string" ? { indexUrl: rag } : rag,
+        { fetchImpl: chatOpts.fetchImpl ?? fetch },
+      );
+      el.rag = context;
+    } catch (err) {
+      // A broken index is not a broken widget: the chat still answers, from the
+      // model alone, and the reason is on the event stream.
+      el.dispatchEvent(new CustomEvent("site-chat-error", {
+        bubbles: true,
+        detail: { message: `retrieval unavailable: ${err?.message ?? err}` },
+      }));
+    }
+  }
+  if (tools) el.tools = tools;
   if (onEvent) {
     el.addEventListener("site-chat-ready", onEvent);
     el.addEventListener("site-chat-error", onEvent);

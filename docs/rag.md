@@ -130,10 +130,46 @@ widget.** The host shows it, confirms with the visitor, and posts it. That is
 the difference between "the assistant drafted a message" and "a small model
 emailed a stranger because the prompt drifted".
 
+## Wiring it into the widget
+
+```js
+const { element } = await mountAssistant({
+  target: "#chat",
+  rag: { indexUrl: "/models/rag-index.json" },        // or a context you built
+  tools: createToolRegistry({
+    submit_contact_form: {
+      run: (args) => post("/api/contact", args),      // your page's own code
+      validate: (args) => args.email.includes("@") || "email is missing",
+      description: "send the contact form",
+    },
+  }),
+});
+```
+
+What that gives you:
+
+- **retrieve before generate.** The request carries a grounded user turn (numbered
+  passages, then the question); the visible log and the conversation history keep
+  what the visitor actually typed, so a second question is not answered against
+  the first question's context.
+- **tools that run.** The model replies with `<tool>name</tool>{…}`, the registry
+  validates and executes it *in the page*, the result is rendered as a line in the
+  log, and a `site-chat-tool` event fires with `{ name, args, result }`.
+- **scopes for session data.** `element.setRagScope(["public", "assessment:42"])`
+  and `element.purgeRag("assessment:42")` — the signed-out state is `setRagScope([])`.
+- **citations.** A sources line under the answer, listing the pages the passages
+  came from.
+- **an index that is not re-fetched.** Cached in IndexedDB per index URL and
+  embedder. Re-publishing an index at the same URL needs a cache-busting query or
+  `clearIndexes()`.
+
+Retrieval failing is not the model failing: if the index cannot be read, the
+widget says so on the event stream and answers from the model alone.
+
 ## What is not here yet
 
-The retrieval engine, the index builder, the CLI and the action protocol are
-implemented and tested. Wiring them into `<site-chat>` — retrieve-then-generate
-on submit, a `setRagScope`/`purgeRag` API for the host, a `site-chat-action`
-event for the confirmation UI — is the next commit on this branch, followed by
-the evaluation work (base vs base+RAG vs tuned vs tuned+RAG on the same benchmark).
+The demo and the site-side examples (a contact tool wired to a real endpoint, a
+session-scoped corpus added and purged on login/logout), and the four-way
+evaluation: base, base+RAG, tuned, tuned+RAG against one benchmark, split by
+document rather than by generated question.
+
