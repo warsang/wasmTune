@@ -18,11 +18,8 @@
 // Public site content uses the scope it was indexed with ("public"); session
 // data uses one scope per subject ("assessment:42").
 
-export const PUBLIC_SCOPE = "public";
-
-export function normalizeScope(scope) {
-  return String(scope ?? PUBLIC_SCOPE).trim() || PUBLIC_SCOPE;
-}
+export { PUBLIC_SCOPE, normalizeScope } from "./scope.mjs";
+import { PUBLIC_SCOPE, normalizeScope, scopeSet } from "./scope.mjs";
 
 export function cosine(a, b) {
   let sum = 0;
@@ -33,7 +30,7 @@ export function cosine(a, b) {
 
 /** Top-k by cosine, with the scope filter applied first. */
 export function searchChunks(chunks, queryVec, { topK = 4, minScore = 0.05, scope = null } = {}) {
-  const allowed = scope === null ? null : new Set((Array.isArray(scope) ? scope : [scope]).map(normalizeScope));
+  const allowed = scopeSet(scope);
   const scored = [];
   for (const chunk of chunks) {
     if (!chunk.vector) continue;
@@ -52,7 +49,7 @@ export function searchChunks(chunks, queryVec, { topK = 4, minScore = 0.05, scop
  * `embedder` must be the same one the browser will embed queries with; its id
  * is recorded so a mismatch is a refusal rather than a bad answer.
  */
-export async function buildIndex({ documents, embedder, scope = PUBLIC_SCOPE, onProgress = null }) {
+export async function buildIndex({ documents, embedder, scope = PUBLIC_SCOPE, retrieval = null, onProgress = null }) {
   const chunks = documents.map((doc, i) => ({
     id: doc.id ?? `${doc.source ?? "doc"}#${doc.ordinal ?? i}`,
     text: doc.text,
@@ -72,6 +69,10 @@ export async function buildIndex({ documents, embedder, scope = PUBLIC_SCOPE, on
     embedder: embedder.id,
     idf,
     scope: normalizeScope(scope),
+    // Suggested retrieval settings, recorded so the CLI's --top-k is not a
+    // no-op: the index is where a host's "how many passages" decision can
+    // travel to the browser, since retrieval happens at query time.
+    ...(retrieval ? { retrieval } : {}),
     chunks: chunks.map((c, i) => ({ ...c, vector: Array.from(vectors[i]) })),
   };
 }
@@ -96,9 +97,13 @@ export function purgeScope(index, scope) {
  * object — and set it to [] on logout, which is the intended way to make a
  * logged-out session see nothing session-scoped.
  */
-export function createRag({ index, embedder, topK = 4, minScore = 0.05 } = {}) {
+export function createRag({ index, embedder, topK = null, minScore = null } = {}) {
   if (!index) throw new Error("createRag needs an index");
   if (!embedder) throw new Error("createRag needs an embedder");
+  // Explicit arguments win; otherwise the index's own suggestion, so the values
+  // a host set at `wasmtune rag index` are what the browser uses.
+  const k = topK ?? index.retrieval?.topK ?? 4;
+  const min = minScore ?? index.retrieval?.minScore ?? 0.05;
   // Exact id match, including the lexical dims: two embedders that both look
   // lexical still produce incomparable vectors if they project into different
   // spaces, and the failure mode is a confidently wrong answer rather than an
@@ -120,7 +125,7 @@ export function createRag({ index, embedder, topK = 4, minScore = 0.05 } = {}) {
       scope = (Array.isArray(next) ? next : [next]).filter(Boolean).map(normalizeScope);
       return scope;
     },
-    async retrieve(question, { topK: k = topK, minScore: s = minScore, scope: overrideScope } = {}) {
+    async retrieve(question, { topK: k2 = k, minScore: s = min, scope: overrideScope } = {}) {
       const [queryVec] = await embedder.embed([question]);
       const allowed = overrideScope ?? scope;
       if (!allowed || !allowed.length) return [];
@@ -235,6 +240,10 @@ export function chunksFromDocs(docs, { maxChars = 1200, overlap = 150, minChars 
 
 export function windowText(text, maxChars, overlap) {
   if (text.length <= maxChars) return [text];
+  // Step by at least one character. With overlap >= maxChars the step was zero
+  // or negative, so a long paragraph looped until the process died — reachable
+  // by setting rag.overlap >= rag.maxChars in a config file.
+  const step = Math.max(1, maxChars - overlap);
   const out = [];
   const paras = text.split(/\n\n+/);
   let cur = "";
@@ -248,14 +257,14 @@ export function windowText(text, maxChars, overlap) {
       let i = 0;
       while (i < para.length) {
         out.push(para.slice(i, i + maxChars));
-        i += maxChars - overlap;
+        i += step;
       }
       cur = "";
     } else {
       cur = overlap && out.length ? `${out[out.length - 1].slice(-overlap)}\n\n${para}` : para;
       if (cur.length > maxChars) {
         out.push(cur.slice(0, maxChars));
-        cur = cur.slice(maxChars - overlap);
+        cur = cur.slice(step);
       }
     }
   }

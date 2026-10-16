@@ -24,5 +24,7 @@ export {
 } from "./rag/index.mjs";
 export { createLexicalEmbedder, createTransformersEmbedder, resolveEmbedder } from "./rag/embed.mjs";
 export { buildGroundedUserMessage, citedSources, withRagSystemPrompt, DEFAULT_RAG_INSTRUCTIONS } from "./rag/prompt.mjs";
-export { CONTACT_ACTION, parseAction, validateAction, stripAction, actionInstruction } from "./rag/action.mjs";
+export { parseToolCall, stripToolCalls, toolInstruction, TOOL_RE } from "./rag/action.mjs";
+export { createToolRegistry } from "./rag/tools.mjs";
+export { PUBLIC_SCOPE as RAG_PUBLIC_SCOPE, normalizeScope, scopeSet } from "./rag/scope.mjs";
 export { cacheKey, clearIndexes, loadIndex as loadStoredIndex, saveIndex } from "./rag/store.mjs";

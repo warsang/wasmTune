@@ -108,6 +108,27 @@ export function createLexicalEmbedder({ dims = LEXICAL_DIMS, idf = null } = {}) 
  * normalization) costs recall in a way that looks like "the model is bad"
  * rather than "the pooling is wrong".
  */
+/**
+ * A specifier that is safe to hand to `import()`.
+ *
+ * The trust boundary here is the operator's own config (the same file that
+ * already names a python trainer), so this is not defending against an
+ * attacker with config access. It is defending against the *accident*: a
+ * `file:///` path, a `data:` URI or a relative path in `transformersUrl`
+ * turning "which CDN should the embedder come from" into "load this file as
+ * code", with the failure surfacing as a stack trace far from the setting.
+ */
+export function assertImportable(spec) {
+  const s = String(spec ?? "");
+  if (/^https:\/\/[^\s]+$/i.test(s)) return s;
+  // A bare package specifier: no scheme, no path separators.
+  if (/^(@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(s)) return s;
+  throw new Error(
+    `transformersUrl must be an https URL or a package name, got "${s}" — ` +
+    `file:, data: and relative specifiers are refused because this value is passed to import()`,
+  );
+}
+
 export function createTransformersEmbedder({
   model = "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
   dtype = "q8",
@@ -121,7 +142,7 @@ export function createTransformersEmbedder({
     if (loadPipeline) {
       extract = await loadPipeline(model, { dtype });
     } else {
-      const spec = transformersUrl ?? "@huggingface/transformers";
+      const spec = assertImportable(transformersUrl ?? "@huggingface/transformers");
       const mod = await import(spec);
       extract = await mod.pipeline("feature-extraction", model, { dtype });
     }

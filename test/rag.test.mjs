@@ -13,9 +13,12 @@ import {
   windowText,
   PUBLIC_SCOPE,
 } from "../src/rag/index.mjs";
-import { createLexicalEmbedder, resolveEmbedder } from "../src/rag/embed.mjs";
+import { createLexicalEmbedder, assertImportable, resolveEmbedder } from "../src/rag/embed.mjs";
 import { buildGroundedUserMessage, citedSources, withRagSystemPrompt } from "../src/rag/prompt.mjs";
-import { actionInstruction, parseAction, validateAction } from "../src/rag/action.mjs";
+import { parseToolCall, toolInstruction } from "../src/rag/action.mjs";
+import { createToolRegistry } from "../src/rag/tools.mjs";
+import { saveIndex } from "../src/rag/store.mjs";
+import { PUBLIC_SCOPE as SCOPE_CONSTANT } from "../src/rag/scope.mjs";
 
 const DOCS = [
   {
@@ -246,52 +249,98 @@ describe("grounding prompt", () => {
   });
 });
 
-describe("actions", () => {
-  it("parses a contact action and strips it from the visible answer", () => {
-    const reply = 'Of course — I have drafted it.\n<tool>submit_contact_form</tool>{"name":"Ada","email":"ada@example.com","message":"Please call me about a pilot."}';
-    const { action, text } = parseAction(reply);
-    assert.equal(action.ok, true);
-    assert.deepEqual(action.args, {
-      name: "Ada", email: "ada@example.com", message: "Please call me about a pilot.", company: null,
-    });
-    assert.equal(text, "Of course — I have drafted it.");
+describe("tool calls", () => {
+  it("parses one call and strips it from the visible answer", () => {
+    const reply = 'Drafting that now.\n<tool>submit_contact_form</tool>{"name":"Ada"}';
+    const { call, text } = parseToolCall(reply, { allowed: ["submit_contact_form"] });
+    assert.deepEqual(call, { name: "submit_contact_form", args: { name: "Ada" } });
+    assert.equal(text, "Drafting that now.");
   });
 
-  it("refuses an action the host did not allow", () => {
-    const { action } = parseAction('<tool>delete_assessments</tool>{}');
-    assert.equal(action.ok, false);
-    assert.match(action.error, /not allowed/);
-  });
-
-  it("refuses a missing or malformed email instead of inventing one", () => {
-    assert.equal(validateAction("submit_contact_form", { name: "Ada", email: "nope", message: "A long enough message." }).ok, false);
-    assert.equal(validateAction("submit_contact_form", { name: "", email: "ada@example.com", message: "A long enough message." }).ok, false);
-    assert.equal(validateAction("submit_contact_form", { name: "Ada", email: "ada@example.com", message: "short" }).ok, false);
-  });
-
-  it("drops keys the action does not document", () => {
-    const result = validateAction("submit_contact_form", {
-      name: "Ada", email: "ada@example.com", message: "Please call me about a pilot.", bcc: "attacker@example.com",
-    });
-    assert.equal(result.ok, true);
-    assert.equal("bcc" in result.args, false);
-  });
-
-  it("survives malformed JSON without showing the tool blob", () => {
-    const { action, text, parseError } = parseAction('<tool>submit_contact_form</tool>{"name": Ada}');
-    assert.equal(action, null);
-    assert.match(parseError, /valid JSON/);
+  it("treats two calls in one reply as no call at all", () => {
+    // Picking one of two is the same class of mistake as trusting the first
+    // line of a shell script.
+    const reply = '<tool>a</tool>{"x":1} <tool>b</tool>{"y":2}';
+    const { call, parseError, text } = parseToolCall(reply);
+    assert.equal(call, null);
+    assert.match(parseError, /more than one tool call/);
     assert.equal(text.includes("<tool>"), false);
   });
 
+  it("refuses a tool the host did not offer", () => {
+    const { call, parseError } = parseToolCall('<tool>rm_rf</tool>{}', { allowed: ["submit_contact_form"] });
+    assert.equal(call, null);
+    assert.match(parseError, /not available/);
+  });
+
+  it("refuses a malformed or non-object payload", () => {
+    assert.match(parseToolCall('<tool>a</tool>{"x": }').parseError, /valid JSON/);
+    assert.match(parseToolCall('<tool>a</tool>[1,2]').parseError, /must be an object/);
+  });
+
   it("leaves an ordinary answer untouched", () => {
-    const { action, text } = parseAction("We offer audits and deployment.");
-    assert.equal(action, null);
+    const { call, text } = parseToolCall("We offer audits and deployment.");
+    assert.equal(call, null);
     assert.equal(text, "We offer audits and deployment.");
   });
 
-  it("instructs the model to ask for missing fields", () => {
-    assert.match(actionInstruction(), /Never invent an email address/);
+  it("builds an instruction only when tools exist", () => {
+    assert.equal(toolInstruction([]), "");
+    assert.match(toolInstruction(["submit_contact_form"]), /submit_contact_form/);
+  });
+});
+
+describe("tool registry", () => {
+  it("runs a registered function and returns its result", async () => {
+    const seen = [];
+    const tools = createToolRegistry({ submit_contact_form: (args) => { seen.push(args); return "sent"; } });
+    const result = await tools.run("submit_contact_form", { name: "Ada" });
+    assert.deepEqual(result, { ok: true, name: "submit_contact_form", result: "sent" });
+    assert.deepEqual(seen, [{ name: "Ada" }]);
+  });
+
+  it("never runs an unregistered name", async () => {
+    const tools = createToolRegistry({ a: () => "ran" });
+    const result = await tools.run("b", {});
+    assert.equal(result.ok, false);
+    assert.match(result.error, /no tool named "b"/);
+  });
+
+  it("lets a tool reject or rewrite its arguments", async () => {
+    const tools = createToolRegistry({
+      strict: { run: (args) => args, validate: (args) => (args.email?.includes("@") ? undefined : "email is missing") },
+      tidy: { run: (args) => args, validate: (args) => ({ name: String(args.name).trim() }) },
+    });
+    const rejected = await tools.run("strict", { email: "nope" });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error, /email is missing/);
+
+    const rewritten = await tools.run("tidy", { name: "  Ada  ", secret: "x" });
+    assert.deepEqual(rewritten.result, { name: "Ada" });
+  });
+
+  it("reports a throwing tool instead of taking the widget down", async () => {
+    const tools = createToolRegistry({ boom: () => { throw new Error("network down"); } });
+    const result = await tools.run("boom", {});
+    assert.equal(result.ok, false);
+    assert.match(result.error, /network down/);
+  });
+
+  it("gives up on a tool that hangs", async () => {
+    const tools = createToolRegistry({ slow: () => new Promise(() => {}) });
+    const result = await tools.run("slow", {}, {}, { timeoutMs: 20 });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /did not finish within 20ms/);
+  });
+
+  it("describes the available tools to the model", () => {
+    const tools = createToolRegistry({
+      book_call: { run: () => {}, description: "open the booking flow", parameters: { email: "string" } },
+    });
+    const instruction = tools.instruction();
+    assert.match(instruction, /<tool>book_call<\/tool>/);
+    assert.match(instruction, /open the booking flow/);
+    assert.equal(createToolRegistry({}).instruction(), "");
   });
 });
 
@@ -313,5 +362,85 @@ describe("loadIndex", () => {
     const embedder = createLexicalEmbedder({ dims: 64 });
     const index = await buildIndex({ documents: chunksFromDocs(DOCS, { minChars: 20 }), embedder });
     assert.ok(index.chunks.every((c) => c.scope === PUBLIC_SCOPE));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regressions. Each of these is a review comment on the first revision of this
+// branch, and each names the failure it prevents.
+// ---------------------------------------------------------------------------
+
+describe("regressions from review", () => {
+  it("terminates when overlap >= maxChars", () => {
+    // The step was maxChars - overlap, so an overlap as large as the window made
+    // it zero and the loop never advanced: a config file could hang the CLI.
+    const parts = windowText("x".repeat(500), 100, 400);
+    assert.ok(parts.length >= 5 && parts.length <= 500, `unexpected window count ${parts.length}`);
+    for (const p of parts) assert.ok(p.length <= 100);
+  });
+
+  it("records retrieval hints in the index so --top-k is not a no-op", async () => {
+    const embedder = createLexicalEmbedder({ dims: 256 });
+    const index = await buildIndex({
+      documents: chunksFromDocs(DOCS, { minChars: 20 }),
+      embedder,
+      retrieval: { topK: 1, minScore: 0 },
+    });
+    assert.deepEqual(index.retrieval, { topK: 1, minScore: 0 });
+    const rag = createRag({ index, embedder });
+    // topK comes from the index when the caller does not override it.
+    assert.equal((await rag.retrieve("hardware is sized to the workload")).length, 1);
+  });
+
+  it("refuses import specs that are not https or a package name", async () => {
+    assert.equal(assertImportable("https://cdn.example.com/transformers.mjs"), "https://cdn.example.com/transformers.mjs");
+    assert.equal(assertImportable("@huggingface/transformers"), "@huggingface/transformers");
+    for (const bad of ["file:///tmp/evil.mjs", "data:text/javascript,alert(1)", "./local.mjs", "../up.mjs"]) {
+      assert.throws(() => assertImportable(bad), /must be an https URL or a package name/, bad);
+    }
+  });
+
+  it("persists public chunks only, using the shared scope constant", async () => {
+    // A fake IndexedDB that records what was written: the assertion is about the
+    // filter, and the filter must agree with the search (one constant, imported
+    // by both) or a session's chunks get written to disk.
+    const written = new Map();
+    const fakeScope = {
+      indexedDB: {
+        open() {
+          const request = {};
+          queueMicrotask(() => {
+            request.result = {
+              objectStoreNames: { contains: () => true },
+              transaction() {
+                return {
+                  objectStore: () => ({ put: (value, key) => written.set(key, value), get: () => {}, clear: () => {} }),
+                  set oncomplete(fn) { queueMicrotask(fn); },
+                  set onerror(_fn) {},
+                };
+              },
+            };
+            request.onsuccess?.();
+          });
+          return request;
+        },
+      },
+    };
+    const embedder = createLexicalEmbedder({ dims: 64 });
+    const index = await buildIndex({
+      documents: chunksFromDocs(
+        [
+          { source: "public.md", text: "# Public\nSite copy anyone may read." },
+          { source: "a.md", text: "# Session\nA session-only finding.", scope: "assessment:42" },
+        ],
+        { minChars: 10 },
+      ),
+      embedder,
+    });
+    const saved = await saveIndex(index, { scope: fakeScope });
+    assert.equal(saved.saved, true);
+    assert.equal(saved.chunks, 1);
+    const persisted = [...written.values()][0];
+    assert.ok(persisted.chunks.every((c) => c.scope === SCOPE_CONSTANT), JSON.stringify(persisted.chunks.map((c) => c.scope)));
   });
 });

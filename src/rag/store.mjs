@@ -11,6 +11,8 @@
 // cannot survive a page refresh. That is not a substitute for the purge on
 // logout — it is the second lock on the same door.
 
+import { PUBLIC_SCOPE, normalizeScope } from "./scope.mjs";
+
 const DB_NAME = "wasmtune-rag";
 const STORE = "indexes";
 
@@ -44,7 +46,10 @@ export function cacheKey(index) {
 export async function saveIndex(index, { scope = globalThis, key = null } = {}) {
   const publicOnly = {
     ...index,
-    chunks: (index.chunks ?? []).filter((c) => String(c.scope ?? "public") === "public"),
+    // Same constant the search uses. A literal "public" here would silently
+    // diverge the day the constant changes, and the failure mode is a session's
+    // chunks written to disk.
+    chunks: (index.chunks ?? []).filter((c) => normalizeScope(c.scope) === PUBLIC_SCOPE),
   };
   const db = await openDb(scope);
   if (!db) return { saved: false, reason: "no indexedDB" };

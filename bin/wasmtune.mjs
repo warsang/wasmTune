@@ -876,7 +876,19 @@ async function cmdRag(opts, cwd) {
   }
   console.error(`[wasmtune] rag: ${docs.length} doc(s) -> ${chunks.length} chunk(s), embedding with ${spec} …`);
   const embedder = await resolveEmbedder(spec, { dtype: rag.dtype ?? "q8" });
-  const index = await buildIndex({ documents: chunks, embedder, scope: rag.scope ?? "public" });
+  // --top-k / rag.topK travel *inside* the index: retrieval happens in the
+  // browser at query time, so a flag that only set a local variable here would
+  // be a documented no-op. Recorded as a suggestion the widget reads.
+  const retrieval = {
+    topK: Number(opts.topK || rag.topK) || 4,
+    minScore: Number(rag.minScore) || 0.05,
+  };
+  const index = await buildIndex({
+    documents: chunks,
+    embedder,
+    scope: rag.scope ?? "public",
+    retrieval,
+  });
   const out = path.resolve(cwd, opts.out ?? path.join(config.output.webDir, rag.indexFile ?? "rag-index.json"));
   await mkdir(path.dirname(out), { recursive: true });
   const json = JSON.stringify(index);
