@@ -110,11 +110,17 @@ export function createToolRegistry(tools = {}) {
 function withTimeout(promise, ms, name) {
   if (!Number.isFinite(ms) || ms <= 0) return promise;
   return new Promise((resolve, reject) => {
+    // Deliberately NOT unref'd. An unref'd timer does not hold the event loop
+    // open, so when the tool is the only pending work — a test, a CLI, a page
+    // that has finished rendering — the loop drains, the timeout never fires,
+    // and this promise never settles. Node 22 reports that as
+    // "Promise resolution is still pending but the event loop has already
+    // resolved" and cancels the rest of the file; Node 24 tolerated it, which is
+    // how it got past a local run and onto CI.
     const timer = setTimeout(
       () => reject(new Error(`tool "${name}" did not finish within ${ms}ms`)),
       ms,
     );
-    timer.unref?.();
     Promise.resolve(promise).then(
       (value) => {
         clearTimeout(timer);
