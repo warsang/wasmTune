@@ -75,7 +75,38 @@ removed from the index, so a later question cannot retrieve them and a leak
 needs two mistakes instead of one. `saveIndex` also refuses to persist anything
 non-public to IndexedDB, so a session's findings cannot survive a page reload.
 
-## Grounding, for models this small
+## Why the embedder is recorded and a mismatch is an error
+
+An embedding is just a vector of numbers; the *positions* in it only mean
+something relative to the model that produced it. Each embedder defines its own
+axes, so two vectors are only comparable if they came from the same one.
+
+This bites silently. The lexical embedder hashes tokens into 512 buckets; a
+MiniLM sentence model has 384 learned dimensions. Their dot product is still a
+number between 0 and 1, so nothing throws — it simply isn't similarity any more.
+What you get is an assistant that retrieves the wrong passages and cites them
+confidently, which reads as "the model is bad" rather than "the maths was
+meaningless".
+
+It matters here more than in a normal app because the two halves run in
+different places at different times: the index is embedded once, in Node, at
+`wasmtune rag index`; the query is embedded later, in the visitor's browser.
+That is the easiest possible setup for the embedder to drift apart — a default
+changed in the config, a browser build pinned to an older package, a model id
+edited in one place only.
+
+So:
+
+- the index stores the embedder id that produced it (`embedder: "transformers:…"`);
+- `loadIndex` builds the query embedder **from that id**, so the browser cannot
+  accidentally choose a different one;
+- `createRag` throws if the embedder it is given is not the one in the index.
+
+Changing the embedder is a re-index, not a runtime setting. If you would rather
+have a warning than a hard failure, that is a one-line change — but the failure
+it prevents is a confident wrong answer, so the default is to refuse.
+
+
 
 The passages go into the **user** message, not a second system message: the chat
 templates for the sizes this package serves commonly accept exactly one leading
