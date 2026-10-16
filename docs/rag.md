@@ -106,7 +106,7 @@ Changing the embedder is a re-index, not a runtime setting. If you would rather
 have a warning than a hard failure, that is a one-line change — but the failure
 it prevents is a confident wrong answer, so the default is to refuse.
 
-
+## Grounding, for models this small
 
 The passages go into the **user** message, not a second system message: the chat
 templates for the sizes this package serves commonly accept exactly one leading
