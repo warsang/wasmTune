@@ -63,6 +63,7 @@ Commands:
   train [--config <path>] [--allow-large] [--backend auto|unsloth|mlx] [--max-steps N] [--dry-run] [--python <bin>]
   eval [--config <path>] [--backend auto|unsloth|mlx] [--max-prompts N] [--max-tokens N] [--skip-tuned] [--judge provider:model] [--python <bin>]
   eval-onnx [--config <path>] [--dtype q4|q8] [--max-tokens N] [--python <bin>] [--onnx-dir <dir>] [--tokenizer-dir <dir>] [--force]
+  rag index [--config <path>] [--embed lexical|transformers:<id>] [--out <file>] [--top-k N]
   convert [--config <path>]
   publish [--config <path>] --repo <user>/<name> [--token <hf-token>] [--private]
   serve [--config <path>] [--port N]
@@ -85,9 +86,18 @@ eval and convert all stay offline and work without an account. It is
 intentionally not part of "build", so a build hook stays reproducible.`;
 
 function parse(argv) {
-  const out = { cmd: argv[2] ?? null, opts: {} };
+  const out = { cmd: argv[2] ?? null, opts: {}, sub: null };
   for (let i = 3; i < argv.length; i++) {
     const a = argv[i];
+    // A bare word directly after the command is a subcommand ("rag index").
+    // Without this it falls through to the unknown-flag error, which is a
+    // confusing way to be told your subcommand exists.
+    if (i === 3 && !a.startsWith("-")) {
+      // Into opts, because main() destructures { cmd, opts } and a third field
+      // on the parse result would quietly stay null.
+      out.opts.sub = a;
+      continue;
+    }
     const eq = a.indexOf("=");
     const flag = eq === -1 ? a : a.slice(0, eq);
     const inline = eq === -1 ? null : a.slice(eq + 1);
@@ -113,6 +123,9 @@ function parse(argv) {
     else if (flag === "--onnx-dir") out.opts.onnxDir = take();
     else if (flag === "--tokenizer-dir") out.opts.tokenizerDir = take();
     else if (flag === "--repo") out.opts.repo = take();
+    else if (flag === "--embed") out.opts.embed = take();
+    else if (flag === "--out") out.opts.out = take();
+    else if (flag === "--top-k") out.opts.topK = Number(take()) || 0;
     else if (flag === "--private") out.opts.private = true;
     else if (flag === "--force") out.opts.force = true;
     else if (flag === "--allow-large" || flag === "--dry-run" || flag === "--skip-tuned" || flag === "--skip-serve") out.opts[flag.slice(2)] = true;
@@ -811,6 +824,79 @@ async function cmdEvalOnnx(opts, cwd) {
     process.exitCode = 1;
   }
 }
+/**
+ * Build the retrieval index for a site's own pages.
+ *
+ * Deliberately a build step rather than something the browser does on every
+ * visit: embedding a few hundred windows is the one part of RAG that costs real
+ * time, and it changes only when the copy changes. The browser embeds the query
+ * only — a few milliseconds — and fetches the vectors.
+ *
+ * A source path becomes a URL, because a citation nobody can open is decoration.
+ * The heuristics cover the layouts this package already assumes (a static site
+ * folder, or a docs/ tree beside it); anything else is overridable by editing
+ * the index, which is plain JSON.
+ */
+function sourceToUrl(source) {
+  const s = String(source ?? "").replace(/\\/g, "/");
+  const stripped = s.replace(/^(public|src|docs|content|pages)\//, "");
+  const noExt = stripped.replace(/\.(md|mdx|txt|html?)$/i, "");
+  if (/(^|\/)(index|readme)$/i.test(noExt)) return `/${noExt.replace(/\/(index|readme)$/i, "")}`.replace(/\/$/, "/");
+  return `/${noExt}`.replace(/\/+/g, "/");
+}
+
+async function cmdRag(opts, cwd) {
+  const { config } = await resolveConfig(opts, cwd);
+  const rag = { ...(config.rag ?? {}) };
+  if (opts.embed) rag.embedder = opts.embed;
+  if (opts.topK) rag.topK = opts.topK;
+  const spec = String(rag.embedder ?? "lexical").startsWith("transformers")
+    ? `transformers:${rag.transformersModel ?? "Xenova/paraphrase-multilingual-MiniLM-L12-v2"}`
+    : rag.embedder ?? "lexical";
+
+  const { collectTexts } = await import("../src/dataset/collect.mjs");
+  const { buildIndex, chunksFromDocs } = await import("../src/rag/index.mjs");
+  const { resolveEmbedder } = await import("../src/rag/embed.mjs");
+
+  // collectTexts returns a report ({ root, roots, docs, totalChars }), not the
+  // docs array — passing the report straight into the chunker fails with
+  // "docs is not iterable", which reads like a chunker bug.
+  const { docs } = await collectTexts(config.dataDir, { cwd });
+  const chunks = chunksFromDocs(docs, {
+    maxChars: Number(rag.maxChars) || 1200,
+    overlap: Number(rag.overlap) || 150,
+    minChars: Number(rag.minChars) || 200,
+    urlFor: (d) => sourceToUrl(d.path),
+  });
+  if (!chunks.length) {
+    throw new Error(
+      `no chunks produced from ${Array.isArray(config.dataDir) ? config.dataDir.join(", ") : config.dataDir} — ` +
+      `check dataDir, or lower rag.minChars`,
+    );
+  }
+  console.error(`[wasmtune] rag: ${docs.length} doc(s) -> ${chunks.length} chunk(s), embedding with ${spec} …`);
+  const embedder = await resolveEmbedder(spec, { dtype: rag.dtype ?? "q8" });
+  // --top-k / rag.topK travel *inside* the index: retrieval happens in the
+  // browser at query time, so a flag that only set a local variable here would
+  // be a documented no-op. Recorded as a suggestion the widget reads.
+  const retrieval = {
+    topK: Number(opts.topK || rag.topK) || 4,
+    minScore: Number(rag.minScore) || 0.05,
+  };
+  const index = await buildIndex({
+    documents: chunks,
+    embedder,
+    scope: rag.scope ?? "public",
+    retrieval,
+  });
+  const out = path.resolve(cwd, opts.out ?? path.join(config.output.webDir, rag.indexFile ?? "rag-index.json"));
+  await mkdir(path.dirname(out), { recursive: true });
+  const json = JSON.stringify(index);
+  await writeFile(out, json);
+  console.error(`[wasmtune] wrote ${out} (${(json.length / 1024).toFixed(0)} KB, ${index.chunks.length} vectors)`);
+  console.error(`[wasmtune] the widget loads it with: rag: { indexUrl: "/models/${path.basename(out)}" }`);
+}
+
 async function cmdServe(opts, cwd) {
   const { config } = await loadConfig(cwd, opts.config ?? null).catch(() => ({ config: null }));
   const port = opts.port ?? 8080;
@@ -836,7 +922,11 @@ async function main() {
   if (cmd === "dataset") return cmdDataset(opts, cwd);
   if (cmd === "train") return cmdTrain(opts, cwd);
   if (cmd === "eval") return cmdEval(opts, cwd);
-if (cmd === "eval-onnx") return cmdEvalOnnx(opts, cwd);
+  if (cmd === "eval-onnx") return cmdEvalOnnx(opts, cwd);
+  if (cmd === "rag") {
+    if (opts.sub !== "index") throw new Error(`unknown rag subcommand "${opts.sub ?? ""}" (expected "rag index")`);
+    return cmdRag(opts, cwd);
+  }
   if (cmd === "convert") return cmdConvert(opts, cwd);
   if (cmd === "publish") return cmdPublish(opts, cwd);
   if (cmd === "build") return cmdBuild(opts, cwd);

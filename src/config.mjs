@@ -18,6 +18,29 @@ export const CONFIG_NAMES = [
 export const VALID_METHODS = new Set(["sft", "dpo", "orpo", "grpo"]);
 export const VALID_BACKENDS = new Set(["auto", "unsloth", "mlx"]);
 
+/** Retrieval defaults. See docs/rag.md. */
+export const DEFAULT_RAG = {
+  enabled: false,
+  // The embedder must be identical at index and query time; the index records
+  // which one produced it and a query embedded with anything else is refused.
+  embedder: "lexical",
+  // A multilingual sentence model, because a four-language site should not
+  // miss a French question about English copy.
+  transformersModel: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+  dtype: "q8",
+  topK: 4,
+  minScore: 0.05,
+  maxChars: 1200,
+  overlap: 150,
+  minChars: 200,
+  // Written relative to output.webDir, so it ships with the rest of the model
+  // assets and needs no second host.
+  indexFile: "rag-index.json",
+  // "public" is the corpus anyone may read; anything else is session data,
+  // retrievable only while the caller's scope list includes it.
+  scope: "public",
+};
+
 export function defaultConfig() {
   return {
     dataDir: "./docs",
@@ -169,6 +192,7 @@ export function normalizeConfig(raw = {}) {
     dataset: { ...(raw.dataset ?? {}) },
     eval: { failOnRegression: true, ...(raw.eval ?? {}) },
     chat: { ...(raw.chat ?? {}) },
+    rag: { ...DEFAULT_RAG, ...(raw.rag ?? {}) },
     output: { ...d.output, ...(raw.output ?? {}) },
   };
 }
@@ -252,6 +276,25 @@ export function validateConfig(cfg, { cwd = process.cwd(), allowLarge = false } 
   // made GRPO unusable out of the box.
   if (cfg.method === "grpo" && cfg.grpo?.rewardFile && !cfg.grpo.rewardFile.endsWith(".py")) {
     errors.push("grpo.rewardFile must be a .py module (imported by the python trainer)");
+  }
+  const rag = cfg.rag ?? {};
+  if (rag.enabled) {
+    if (!["lexical"].includes(String(rag.embedder)) && !String(rag.embedder).startsWith("transformers")) {
+      errors.push('rag.embedder must be "lexical" or "transformers:<hf-model-id>"');
+    }
+    for (const k of ["topK", "minChars"]) {
+      if (!(Number.isFinite(Number(rag[k])) && Number(rag[k]) >= 1)) {
+        errors.push(`rag.${k} must be a positive number`);
+      }
+    }
+    for (const k of ["minScore", "maxChars"]) {
+      if (!(Number.isFinite(Number(rag[k])) && Number(rag[k]) > 0)) {
+        errors.push(`rag.${k} must be a positive number`);
+      }
+    }
+    if (!rag.indexFile || typeof rag.indexFile !== "string") {
+      errors.push("rag.indexFile must be a file name (written under output.webDir)");
+    }
   }
   return errors;
 }
