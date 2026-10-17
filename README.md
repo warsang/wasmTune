@@ -697,3 +697,7 @@ test/                 157 tests
 ## License
 
 MIT.
+
+## Browser requirements
+
+Local chat and RAG need WebGPU, and a Content-Security-Policy that allows the engine and the model weights. 'no local engine' usually means a blocked request rather than a missing dependency - see [docs/csp-requirements.md](docs/csp-requirements.md).
