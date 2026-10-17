@@ -97,11 +97,18 @@ export function createToolRegistry(tools = {}) {
         const params = e.parameters ? ` ${JSON.stringify(e.parameters)}` : "";
         return `  <tool>${e.name}</tool>${params}${what}`;
       });
+      const first = [...entries.values()][0];
+      const example = first
+        ? `\nExample of a valid reply (nothing else on the line): <tool>${first.name}</tool>{"name":"Jane Doe","email":"jane@example.com","message":"I would like a pentest for my company"}`
+        : "";
       return (
-        "You can ask this page to do one thing for the visitor. When the request is clear, " +
-        "reply with exactly one line of the form <tool>name</tool>{\"argument\":\"value\"} and " +
-        "nothing else; the page runs it and reports back. If a required detail is missing, ask " +
-        "for it instead of inventing it. Available:\n" + lines.join("\n")
+        "This page can perform actions for the visitor through you. When the visitor asks you " +
+        "to perform one of the actions below, you MUST reply with exactly one line and nothing " +
+        "else, in this exact form: <tool>name</tool>{\"argument\":\"value\"}. The page will run " +
+        "it and report the result back to you. Do not describe the action in prose, do not " +
+        "answer around it, and do not wrap it in code fences. If a required argument is missing " +
+        "(for example a name or email), ask the visitor for it instead of inventing it. " +
+        "Available actions:\n" + lines.join("\n") + example
       );
     },
   };

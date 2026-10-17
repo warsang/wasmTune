@@ -697,3 +697,7 @@ test/                 157 tests
 ## License
 
 MIT.
+
+## Integration
+
+End-to-end recipe for adding the chat widget to a static site: docs/recipe.md. CSP requirements and the two traps that look like bugs: docs/csp-requirements.md.

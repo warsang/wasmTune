@@ -394,7 +394,12 @@ export function defineSiteChat({ model, gguf = null, onnx = null, allowForce = f
     _spawnWorker(initOverride = null) {
       try {
         if (this._worker) this._worker.terminate();
-        const url = this._workerUrl || new URL("./worker.js", import.meta.url);
+        // Prefer the self-contained bundle that ships in the package: it inlines
+        // the engine, so a plain static host needs no bundler and no
+        // copy/rewrite step. Fall back to the source worker for unbuilt dev
+        // checkouts, where the bundle has not been generated yet.
+        const url = this._workerUrl
+          || new URL("./bundled/worker.js", import.meta.url);
         const w = new Worker(url, { type: "module" });
         w.onmessage = (e) => {
           const m = e.data || {};

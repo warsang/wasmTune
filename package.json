@@ -83,7 +83,8 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "demo": "vite --config vite.demo.config.js",
-    "build:demo": "vite build --config vite.demo.config.js && vite build --config vite.worker.config.js"
+    "build:demo": "vite build --config vite.demo.config.js && vite build --config vite.worker.config.js",
+    "build:worker": "vite build --config vite.worker.bundled.config.js"
   },
   "engines": {
     "node": ">=20"
