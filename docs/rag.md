@@ -124,7 +124,7 @@ does not. If the instruction is enabled, the model may emit:
 <tool>submit_contact_form</tool>{"name":"…","email":"…","message":"…"}
 ```
 
-`parseAction` validates it — allowed name, real-looking email, minimum length,
+`parseToolCall` validates it — allowed name, real-looking email, minimum length,
 unknown keys dropped — and hands it back. **Nothing is sent by the parser or the
 widget.** The host shows it, confirms with the visitor, and posts it. That is
 the difference between "the assistant drafted a message" and "a small model

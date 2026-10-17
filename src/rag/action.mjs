@@ -15,14 +15,15 @@
 // between calls, so matching in one place and replacing in another can skip or
 // miss depending on order. Same shape as the widget's mirror of this marker.
 const TOOL_RE_SRC = "<tool>\\s*([a-z0-9_.-]+)\\s*</tool>\\s*(\\{[^}]*\\}|\\[[^\\]]*\\])?";
-/** Prefer this: a fresh regex per call cannot be left in a bad state. */
-export const toolRe = () => new RegExp(TOOL_RE_SRC, "gi");
 /**
- * Kept because it was already exported, but this module never uses it
- * internally — a caller that shares one /g instance across matches inherits the
- * `lastIndex` trap, which is exactly why `toolRe()` exists.
+ * A fresh regex per call — the only safe way to hand one out.
+ *
+ * There used to be an exported `TOOL_RE` singleton here. Exporting a stateful /g
+ * regex is the bug this module exists to avoid, one level up: any caller that
+ * reused it across `exec`/`matchAll`/`replace` would inherit the same `lastIndex`
+ * leak the internals were fixed for. Nothing in this package used it.
  */
-export const TOOL_RE = toolRe();
+export const toolRe = () => new RegExp(TOOL_RE_SRC, "gi");
 
 /**
  * Parse a reply into zero or one tool call.

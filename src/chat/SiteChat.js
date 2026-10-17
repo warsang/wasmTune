@@ -77,7 +77,12 @@ function mkButton(label, fn) {
 // `lastIndex` between uses, so the same object matched in one function and
 // replaced in another can skip or miss depending on call order — the kind of bug
 // that shows up as "the tool fired but the text still shows the marker".
-const TOOL_MARKER_SRC = "<tool>\\s*([a-z0-9_.-]+)\\s*</tool>\\s*(\\{[^}]*\\})?";
+// The payload branch accepts an array as well as an object, matching
+// src/rag/action.mjs. Without it a reply like `<tool>name</tool>[1,2]` — which the
+// canonical parser rejects as "must be an object" — would keep its raw marker
+// visible in the stream and in the answer bubble, because this mirror could not
+// match the tag at all.
+const TOOL_MARKER_SRC = "<tool>\\s*([a-z0-9_.-]+)\\s*</tool>\\s*(\\{[^}]*\\}|\\[[^\\]]*\\])?";
 const toolMarkerRe = () => new RegExp(TOOL_MARKER_SRC, "gi");
 
 function stripToolMarkers(text) {
