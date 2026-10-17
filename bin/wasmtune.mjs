@@ -3,8 +3,8 @@
 //   wasmtune init|check|models|dataset|train|eval|convert|serve|build
 // Zero runtime deps; Python/torch live behind the auto-venv in train/.
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -68,6 +68,7 @@ Commands:
   publish [--config <path>] --repo <user>/<name> [--token <hf-token>] [--private]
   serve [--config <path>] [--port N]
   build [--config <path>] [train/eval/dataset flags...] — dataset→train→eval→convert; eval gate fails the build
+  bundle [--out <path>] [--from-source] — copy the self-contained chat worker (engine inlined) to --out (default ./wasmtune-worker.js); --from-source rebuilds it from src/chat/worker.js (needs vite)
 
 Config: wasmtune.config.json (or .js/.mjs). See templates/wasmtune.config.example.json.
 Config-free runs: pass --dataDir <dir> --model <hf-id> instead of a file, plus
@@ -125,6 +126,7 @@ function parse(argv) {
     else if (flag === "--repo") out.opts.repo = take();
     else if (flag === "--embed") out.opts.embed = take();
     else if (flag === "--out") out.opts.out = take();
+    else if (flag === "--from-source") out.opts.fromSource = true;
     else if (flag === "--top-k") out.opts.topK = Number(take()) || 0;
     else if (flag === "--private") out.opts.private = true;
     else if (flag === "--force") out.opts.force = true;
@@ -897,6 +899,71 @@ async function cmdRag(opts, cwd) {
   console.error(`[wasmtune] the widget loads it with: rag: { indexUrl: "/models/${path.basename(out)}" }`);
 }
 
+/**
+ * Copy (or rebuild) the self-contained chat worker.
+ *
+ * The package ships a pre-bundled worker (src/chat/worker.bundled.js) that
+ * inlines @mlc-ai/web-llm, so mountAssistant() works on a plain static host
+ * with no bundler and no copy/rewrite step. `bundle` puts that file where the
+ * site's workerUrl points (default ./wasmtune-worker.js). `--from-source`
+ * rebuilds it from src/chat/worker.js via vite (requires vite on PATH or in the
+ * consumer's node_modules) — use that to pin a different engine version or to
+ * apply a local patch.
+ */
+async function cmdBundle(opts, cwd) {
+  const outDir = path.resolve(cwd, opts.out ?? "wasmtune-worker");
+  await mkdir(outDir, { recursive: true });
+
+  const shippedDir = path.join(pkgRoot, "src", "chat", "bundled");
+  let sourceDir = shippedDir;
+  if (opts.fromSource) {
+    // Locate vite: prefer the consumer's, then the package's own devDep.
+    const viteBin = [
+      path.join(cwd, "node_modules", ".bin", "vite"),
+      path.join(pkgRoot, "node_modules", ".bin", "vite"),
+    ].find((p) => existsSync(p));
+    if (!viteBin) {
+      throw new Error(
+        "bundle --from-source needs vite. Install it (`npm i -D vite`) in this " +
+        "project, or drop --from-source to use the worker bundled with wasmtune.",
+      );
+    }
+    const tmpDir = path.join(cwd, ".wasmtune-worker-build");
+    await rm(tmpDir, { recursive: true, force: true });
+    await mkdir(tmpDir, { recursive: true });
+    const env = { ...process.env, WASMTUNE_WORKER_OUT: tmpDir };
+    await new Promise((resolve, reject) => {
+      const child = spawn(viteBin, ["build", "--config", path.join(pkgRoot, "vite.worker.bundled.config.js")], {
+        cwd, env, stdio: "inherit",
+      });
+      child.on("error", reject);
+      child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`vite exited ${code}`))));
+    });
+    sourceDir = tmpDir;
+  }
+
+  if (!existsSync(path.join(sourceDir, "worker.js"))) {
+    throw new Error(
+      "no bundled worker available " +
+      `(${path.join(sourceDir, "worker.js")} missing). Run \`npm run build:worker\` ` +
+      "in the wasmtune source, or pass --from-source to build it here (needs vite).",
+    );
+  }
+
+  // Copy the whole bundle directory: worker.js plus its chunks, which resolve
+  // relative to worker.js at runtime. Copying only worker.js 404s the chunks.
+  for (const ent of readdirSync(sourceDir, { withFileTypes: true })) {
+    if (!ent.isFile()) continue;
+    const src = path.join(sourceDir, ent.name);
+    const dst = path.join(outDir, ent.name);
+    await writeFile(dst, await readFile(src));
+  }
+  if (opts.fromSource) rmSync(path.join(cwd, ".wasmtune-worker-build"), { recursive: true, force: true });
+
+  console.error(`[wasmtune] wrote ${outDir}/ (${readdirSync(outDir).length} files)`);
+  console.error(`[wasmtune] point mountAssistant at it: mountAssistant({ target, workerUrl: "/${path.basename(outDir)}/worker.js" })`);
+}
+
 async function cmdServe(opts, cwd) {
   const { config } = await loadConfig(cwd, opts.config ?? null).catch(() => ({ config: null }));
   const port = opts.port ?? 8080;
@@ -929,6 +996,7 @@ async function main() {
   }
   if (cmd === "convert") return cmdConvert(opts, cwd);
   if (cmd === "publish") return cmdPublish(opts, cwd);
+  if (cmd === "bundle") return cmdBundle(opts, cwd);
   if (cmd === "build") return cmdBuild(opts, cwd);
   if (cmd === "serve") return cmdServe(opts, cwd);
   console.error(`unknown command "${cmd}"\n${USAGE}`);
