@@ -10,10 +10,21 @@ import { requirementsFor } from "../models.mjs";
 
 // Final text for history + done display: loop-truncated, thinking-stripped,
 // thinking-leak flagged (eval + debugging signal).
+//
+// Tool markers are preserved even when they sit inside a thinking block: a
+// reasoning model may emit `<tool>…</tool>{…}` while thinking, and stripping
+// the block would otherwise hide the call from SiteChat's tool runner.
 function finalize(text) {
-  const cut = truncateAtLoop(text);
+  const raw = String(text ?? "");
+  const markerRe = /<tool>\s*[a-z0-9_.-]+\s*<\/tool>\s*(\{[^}]*\}|\[[^\]]*\])?/gi;
+  const markers = [...raw.matchAll(markerRe)].map((m) => m[0]);
+  const cut = truncateAtLoop(raw);
   const { text: clean, stripped } = stripThinkingBlocks(cut);
-  return { full: clean, thoughtOutLoud: stripped };
+  let result = clean;
+  for (const m of markers) {
+    if (!result.includes(m)) result = result.trim() + (result.trim() ? "\n" : "") + m;
+  }
+  return { full: result.trim(), thoughtOutLoud: stripped };
 }
 
 let engine = null;
